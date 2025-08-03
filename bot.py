@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "6.1"  # Token system with shortener
+BOT_VERSION = "6.2"  # Improved token system with API integration
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Enhanced HTTP handler for health checks and monitoring"""
@@ -227,14 +227,21 @@ async def has_valid_token(user_id):
     tokens.delete_one({"user_id": user_id})
     return False
 
-# Shorten URL using upshrink.com
+# Shorten URL using ad_api service
 def shorten_url(url):
-    """Shorten URL using upshrink.com API"""
+    """Shorten URL using ad_api service with API key"""
     try:
+        api_key = os.getenv('SHORTENER_API_KEY', '446b3a3f0039a2826f1483f22e9080963974ad3b')
+        api_url = os.getenv('SHORTENER_API_URL', 'https://upshrink.com/api/shorten')
+        
+        params = {"url": url}
+        if api_key:
+            params['api_key'] = api_key
+        
         response = requests.get(
-            "https://upshrink.com/api/shorten",
-            params={"url": url},
-            timeout=5
+            api_url,
+            params=params,
+            timeout=10
         )
         if response.status_code == 200:
             data = response.json()
@@ -331,23 +338,15 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode='Markdown'
         )
 
-# Token verification middleware
-async def token_verification(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
-    user = update.effective_user
-    user_id = user.id
+# Token verification helper
+async def check_token_or_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE, handler):
+    """Check if user is sudo or has valid token"""
+    user_id = update.effective_user.id
+    if is_sudo(user_id) or await has_valid_token(user_id):
+        return await handler(update, context)
     
-    # Skip token check for sudo users and token command
-    if is_sudo(user_id) or update.message.text.startswith('/token'):
-        return await command_handler(update, context)
-    
-    # Check if user has valid token
-    if await has_valid_token(user_id):
-        return await command_handler(update, context)
-    
-    # Token required message
     await update.message.reply_text(
-        "🔒 Access restricted!\n\n"
-        "You need a token to use this feature. Tokens are valid for 24 hours.\n\n"
+        "🔒 Access restricted! You need a valid token to use this feature.\n\n"
         "Use /token to get your access token.",
         parse_mode='Markdown'
     )
@@ -366,16 +365,22 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             token_data = tokens.find_one({"token": token})
             
             if token_data:
+                # Only allow token activation for the user who generated it
+                if token_data.get("user_id") != user_id:
+                    await update.message.reply_text(
+                        "⚠️ This token belongs to another user. "
+                        "Only the token owner can activate it.",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
                 # Check if token is expired
                 expires_at = token_data.get("expires_at")
                 if expires_at and datetime.utcnow() < expires_at:
-                    # Update token to current user
+                    # Update last used time
                     tokens.update_one(
                         {"token": token},
-                        {"$set": {
-                            "user_id": user_id,
-                            "last_used": datetime.utcnow()
-                        }}
+                        {"$set": {"last_used": datetime.utcnow()}}
                     )
                     await update.message.reply_text(
                         "✅ Token activated successfully!\n"
@@ -383,6 +388,9 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         parse_mode='Markdown'
                     )
                     return await start(update, context)
+                else:
+                    # Token expired
+                    tokens.delete_one({"token": token})
         
         await update.message.reply_text(
             "⚠️ Invalid or expired token. Use /token to get a new one.",
@@ -390,28 +398,29 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     
-    await token_verification(update, context, start)
+    # Skip token check for the start command itself
+    await start(update, context)
 
 async def help_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, help_command)
+    await check_token_or_sudo(update, context, help_command)
 
 async def create_quiz_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, create_quiz)
+    await check_token_or_sudo(update, context, create_quiz)
 
 async def stats_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, stats_command)
+    await check_token_or_sudo(update, context, stats_command)
 
 async def broadcast_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, broadcast_command)
+    await check_token_or_sudo(update, context, broadcast_command)
 
 async def confirm_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, confirm_broadcast)
+    await check_token_or_sudo(update, context, confirm_broadcast)
 
 async def cancel_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, cancel_broadcast)
+    await check_token_or_sudo(update, context, cancel_broadcast)
 
 async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await token_verification(update, context, handle_document)
+    await check_token_or_sudo(update, context, handle_document)
 
 # Original command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -823,7 +832,7 @@ def main() -> None:
     application.add_handler(CommandHandler("broadcast", broadcast_command_wrapper))
     application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
     application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
-    application.add_handler(CommandHandler("token", token_command))  # Changed to token
+    application.add_handler(CommandHandler("token", token_command))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
     
     # Start polling
