@@ -9,10 +9,9 @@ import html
 import secrets
 import string
 import random
-import requests
 import aiohttp
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "7.0"  # Improved token system with API integration
+BOT_VERSION = "7.1"  # Fixed PyMongo truthiness issues
 temp_params = {}  # Temporary storage for verification params
 
 # API Configuration
@@ -174,7 +173,7 @@ def get_db():
 def create_ttl_index():
     try:
         db = get_db()
-        if db:
+        if db is not None:  # Fixed: Use explicit None check
             tokens = db.tokens
             tokens.create_index("expires_at", expireAfterSeconds=0)
             logger.info("Created TTL index for token expiration")
@@ -185,7 +184,7 @@ def create_ttl_index():
 async def record_user_interaction(update: Update):
     try:
         db = get_db()
-        if db is None:
+        if db is None:  # Fixed: Use explicit None check
             return
             
         user = update.effective_user
@@ -245,7 +244,7 @@ async def has_valid_token(user_id):
         return True
         
     db = get_db()
-    if not db:
+    if db is None:  # Fixed: Use explicit None check
         return False
         
     tokens = db.tokens
@@ -342,7 +341,7 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if user_id in temp_params and temp_params[user_id] == token:
             # Store token in database
             db = get_db()
-            if db:
+            if db is not None:  # Fixed: Use explicit None check
                 tokens = db.tokens
                 tokens.update_one(
                     {"user_id": user_id},
@@ -559,7 +558,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     db = get_db()
-    if db is None:
+    if db is None:  # Fixed: Use explicit None check
         await update.message.reply_text("⚠️ Database connection error. Stats unavailable.")
         return
         
@@ -623,7 +622,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     replied_msg = update.message.reply_to_message
         
     db = get_db()
-    if db is None:
+    if db is None:  # Fixed: Use explicit None check
         await update.message.reply_text("⚠️ Database connection error. Broadcast unavailable.")
         return
         
