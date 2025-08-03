@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: telegram-quiz-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: TELEGRAM_TOKEN
+        fromService:
+          type: secret
+          name: telegram_token
+      - key: OWNER_ID
+        fromService:
+          type: secret
+          name: owner_id
+      - key: MONGO_URI
+        fromService:
+          type: secret
+          name: mongo_uri
