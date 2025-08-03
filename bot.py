@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "7.1"  # Fixed PyMongo truthiness issues
+BOT_VERSION = "7.2"  # 24-hour tokens with performance improvements
 temp_params = {}  # Temporary storage for verification params
 
 # API Configuration
@@ -173,7 +173,7 @@ def get_db():
 def create_ttl_index():
     try:
         db = get_db()
-        if db is not None:  # Fixed: Use explicit None check
+        if db is not None:
             tokens = db.tokens
             tokens.create_index("expires_at", expireAfterSeconds=0)
             logger.info("Created TTL index for token expiration")
@@ -184,7 +184,7 @@ def create_ttl_index():
 async def record_user_interaction(update: Update):
     try:
         db = get_db()
-        if db is None:  # Fixed: Use explicit None check
+        if db is None:
             return
             
         user = update.effective_user
@@ -222,12 +222,17 @@ async def get_shortened_url(deep_link):
     try:
         api_url = f"https://{WEBSITE_URL}/api?api={AD_API}&url={deep_link}"
         
-        async with aiohttp.ClientSession() as session:
+        # Use timeout to prevent hanging
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(api_url) as response:
                 if response.status == 200:
                     data = await response.json()
                     if data.get("status") == "success":
                         return data.get("shortenedUrl")
+        return None
+    except asyncio.TimeoutError:
+        logger.warning("URL shortening timed out")
         return None
     except Exception as e:
         logger.error(f"URL shortening failed: {e}")
@@ -244,7 +249,7 @@ async def has_valid_token(user_id):
         return True
         
     db = get_db()
-    if db is None:  # Fixed: Use explicit None check
+    if db is None:
         return False
         
     tokens = db.tokens
@@ -269,7 +274,7 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Check if user already has valid token
     if await has_valid_token(user_id):
         await update.message.reply_text(
-            "✅ Your free session is already active! Enjoy your access.",
+            "✅ Your access token is already active! Enjoy your 24-hour access.",
             parse_mode='Markdown'
         )
         return
@@ -293,9 +298,9 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Create response message
     response_text = (
-        "🔑 Click the button below to verify your free access token:\n\n"
+        "🔑 Click the button below to verify your access token:\n\n"
         "✨ <b>What you'll get:</b>\n"
-        "1. Full access for 3 hours\n"
+        "1. Full access for 24 hours\n"
         "2. Increased command limits\n"
         "3. All features unlocked\n\n"
         "This link is valid for 5 minutes"
@@ -341,14 +346,14 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if user_id in temp_params and temp_params[user_id] == token:
             # Store token in database
             db = get_db()
-            if db is not None:  # Fixed: Use explicit None check
+            if db is not None:
                 tokens = db.tokens
                 tokens.update_one(
                     {"user_id": user_id},
                     {"$set": {
                         "token": token,
                         "created_at": datetime.utcnow(),
-                        "expires_at": datetime.utcnow() + timedelta(hours=3)
+                        "expires_at": datetime.utcnow() + timedelta(hours=24)  # Changed to 24 hours
                     }},
                     upsert=True
                 )
@@ -356,7 +361,7 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # Remove temp param and notify user
             del temp_params[user_id]
             await update.message.reply_text(
-                "✅ Token activated successfully! Enjoy your 3-hour access.",
+                "✅ Token activated successfully! Enjoy your 24-hour access.",  # Updated message
                 parse_mode='Markdown'
             )
         else:
@@ -406,7 +411,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_sudo(update.effective_user.id):
         welcome_msg += (
             "🔒 You need a token to access all features\n"
-            "Get your free token with /token - Valid for 3 hours\n\n"
+            "Get your access token with /token - Valid for 24 hours\n\n"  # Updated duration
         )
     
     welcome_msg += "Let's make learning fun!"
@@ -522,6 +527,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(
                 f"✅ Sending {len(valid_questions)} quiz question(s)..."
             )
+            
+            # Send all quizzes asynchronously
+            send_tasks = []
             for question, options, correct_id, explanation in valid_questions:
                 try:
                     poll_params = {
@@ -537,10 +545,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     if explanation:
                         poll_params["explanation"] = explanation
                     
-                    await context.bot.send_poll(**poll_params)
+                    # Create task but don't await immediately
+                    task = context.bot.send_poll(**poll_params)
+                    send_tasks.append(task)
                 except Exception as e:
-                    logger.error(f"Poll send error: {str(e)}")
-                    await update.message.reply_text("⚠️ Failed to send one quiz. Continuing...")
+                    logger.error(f"Poll creation error: {str(e)}")
+            
+            # Send all quizzes concurrently
+            await asyncio.gather(*send_tasks, return_exceptions=True)
+            
         else:
             await update.message.reply_text("❌ No valid questions found in file")
             
@@ -558,7 +571,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     db = get_db()
-    if db is None:  # Fixed: Use explicit None check
+    if db is None:
         await update.message.reply_text("⚠️ Database connection error. Stats unavailable.")
         return
         
@@ -622,7 +635,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     replied_msg = update.message.reply_to_message
         
     db = get_db()
-    if db is None:  # Fixed: Use explicit None check
+    if db is None:
         await update.message.reply_text("⚠️ Database connection error. Broadcast unavailable.")
         return
         
@@ -733,11 +746,11 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 success += 1
             else:
                 failed += 1
-                if error and len(failed_details) < 20:  # Keep reasonable number of errors
+                if error and len(failed_details) < 20:
                     failed_details.append(error)
             
-            # Update progress every 10 users or last user
-            if (i + 1) % 10 == 0 or (i + 1) == total_users:
+            # Update progress every 20 users or last user
+            if (i + 1) % 20 == 0 or (i + 1) == total_users:
                 percent = (i + 1) * 100 // total_users
                 await status_msg.edit_text(
                     f"📤 Broadcasting to {total_users} users...\n\n"
@@ -745,7 +758,7 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     f"✅ Success: {success} | ❌ Failed: {failed}"
                 )
                 # Conservative rate limiting
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
         
         # Prepare final report
         report_text = (
@@ -758,7 +771,7 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Add error details if any failures
         if failed > 0:
             report_text += f"\n\n📛 Failed Users (Sample):\n"
-            report_text += "\n".join(failed_details[:5])  # Show first 5 errors
+            report_text += "\n".join(failed_details[:5])
             if failed > 5:
                 report_text += f"\n\n...and {failed - 5} more failures"
         
