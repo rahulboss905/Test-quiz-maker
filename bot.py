@@ -5,7 +5,10 @@ import time
 import socket
 import traceback
 import asyncio
-import html  # Added for HTML escaping
+import html
+import secrets
+import string
+import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import (
@@ -28,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "5.5"  # HTML broadcast previews
+BOT_VERSION = "6.1"  # Token system with shortener
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Enhanced HTTP handler for health checks and monitoring"""
@@ -190,6 +193,227 @@ async def record_user_interaction(update: Update):
     except Exception as e:
         logger.error(f"Error saving user data: {e}")
 
+# Generate a secure token
+def generate_token(length=8):
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+# Check if user is sudo
+def is_sudo(user_id):
+    owner_id = os.getenv('OWNER_ID')
+    return owner_id and str(user_id) == owner_id
+
+# Check if user has valid token
+async def has_valid_token(user_id):
+    if is_sudo(user_id):
+        return True
+        
+    db = get_db()
+    if not db:
+        return False
+        
+    tokens = db.tokens
+    token_data = tokens.find_one({"user_id": user_id})
+    
+    if not token_data:
+        return False
+        
+    # Check if token is expired
+    expires_at = token_data.get("expires_at")
+    if expires_at and datetime.utcnow() < expires_at:
+        return True
+        
+    # Remove expired token
+    tokens.delete_one({"user_id": user_id})
+    return False
+
+# Shorten URL using upshrink.com
+def shorten_url(url):
+    """Shorten URL using upshrink.com API"""
+    try:
+        response = requests.get(
+            "https://upshrink.com/api/shorten",
+            params={"url": url},
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("short_url", url)
+    except Exception as e:
+        logger.error(f"URL shortening failed: {e}")
+    return url
+
+# Create or renew token
+async def create_token(user_id):
+    db = get_db()
+    if not db:
+        return None, None
+        
+    tokens = db.tokens
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    token_value = generate_token()
+    
+    token_data = {
+        "user_id": user_id,
+        "token": token_value,
+        "created_at": datetime.utcnow(),
+        "expires_at": expires_at
+    }
+    
+    tokens.update_one(
+        {"user_id": user_id},
+        {"$set": token_data},
+        upsert=True
+    )
+    
+    # Create activation URL
+    bot_username = os.getenv('BOT_USERNAME', 'your_bot')
+    activation_url = f"https://t.me/{bot_username}?start={token_value}"
+    short_url = shorten_url(activation_url)
+    
+    return token_value, short_url
+
+# Token command
+async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await record_user_interaction(update)
+    user = update.effective_user
+    user_id = user.id
+    
+    # Sudo users don't need tokens
+    if is_sudo(user_id):
+        await update.message.reply_text(
+            "🌟 You are a sudo user! You don't need a token to use the bot.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Check if user already has valid token
+    if await has_valid_token(user_id):
+        db = get_db()
+        if db:
+            tokens = db.tokens
+            token_data = tokens.find_one({"user_id": user_id})
+            if token_data:
+                expires_at = token_data["expires_at"]
+                remaining = expires_at - datetime.utcnow()
+                hours = int(remaining.total_seconds() // 3600)
+                minutes = int((remaining.total_seconds() % 3600) // 60)
+                
+                # Create activation URL
+                bot_username = os.getenv('BOT_USERNAME', 'your_bot')
+                activation_url = f"https://t.me/{bot_username}?start={token_data['token']}"
+                short_url = shorten_url(activation_url)
+                
+                await update.message.reply_text(
+                    f"🔑 You already have a valid token!\n\n"
+                    f"• Token: `{token_data['token']}`\n"
+                    f"• Activation: {short_url}\n"
+                    f"• Expires in: {hours} hours {minutes} minutes\n\n"
+                    f"Share this link to activate on other devices.",
+                    parse_mode='Markdown'
+                )
+                return
+    
+    # Create new token
+    token, short_url = await create_token(user_id)
+    if token and short_url:
+        await update.message.reply_text(
+            f"🎉 Your 24-hour access token is ready!\n\n"
+            f"• Token: `{token}`\n"
+            f"• Activation: {short_url}\n\n"
+            f"Click the link or send /start {token} to activate.\n"
+            f"Valid for 24 hours ⏳",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "⚠️ Failed to generate token. Please try again later.",
+            parse_mode='Markdown'
+        )
+
+# Token verification middleware
+async def token_verification(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
+    user = update.effective_user
+    user_id = user.id
+    
+    # Skip token check for sudo users and token command
+    if is_sudo(user_id) or update.message.text.startswith('/token'):
+        return await command_handler(update, context)
+    
+    # Check if user has valid token
+    if await has_valid_token(user_id):
+        return await command_handler(update, context)
+    
+    # Token required message
+    await update.message.reply_text(
+        "🔒 Access restricted!\n\n"
+        "You need a token to use this feature. Tokens are valid for 24 hours.\n\n"
+        "Use /token to get your access token.",
+        parse_mode='Markdown'
+    )
+
+# Wrapper functions for token verification
+async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Special handling for token activation
+    if context.args and context.args[0]:
+        token = context.args[0]
+        user = update.effective_user
+        user_id = user.id
+        
+        db = get_db()
+        if db:
+            tokens = db.tokens
+            token_data = tokens.find_one({"token": token})
+            
+            if token_data:
+                # Check if token is expired
+                expires_at = token_data.get("expires_at")
+                if expires_at and datetime.utcnow() < expires_at:
+                    # Update token to current user
+                    tokens.update_one(
+                        {"token": token},
+                        {"$set": {
+                            "user_id": user_id,
+                            "last_used": datetime.utcnow()
+                        }}
+                    )
+                    await update.message.reply_text(
+                        "✅ Token activated successfully!\n"
+                        "You now have full access to bot features for 24 hours.",
+                        parse_mode='Markdown'
+                    )
+                    return await start(update, context)
+        
+        await update.message.reply_text(
+            "⚠️ Invalid or expired token. Use /token to get a new one.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    await token_verification(update, context, start)
+
+async def help_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, help_command)
+
+async def create_quiz_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, create_quiz)
+
+async def stats_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, stats_command)
+
+async def broadcast_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, broadcast_command)
+
+async def confirm_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, confirm_broadcast)
+
+async def cancel_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, cancel_broadcast)
+
+async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await token_verification(update, context, handle_document)
+
+# Original command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     """Send welcome message and instructions"""
@@ -197,7 +421,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🌟 *Welcome to Quiz Bot!* 🌟\n\n"
         "I can turn your text files into interactive 10-second quizzes!\n\n"
         "🔹 Use /createquiz - Start quiz creation\n"
-        "🔹 Use /help - Show formatting guide\n\n"
+        "🔹 Use /help - Show formatting guide\n"
+        "🔹 Use /token - Get your access token\n\n"
         "Let's make learning fun!",
         parse_mode='Markdown'
     )
@@ -591,14 +816,15 @@ def main() -> None:
     application = Application.builder().token(TOKEN).build()
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("createquiz", create_quiz))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("broadcast", broadcast_command))
-    application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast))
-    application.add_handler(CommandHandler("cancel", cancel_broadcast))
-    application.add_handler(MessageHandler(filters.Document.TEXT, handle_document))
+    application.add_handler(CommandHandler("start", start_wrapper))
+    application.add_handler(CommandHandler("help", help_command_wrapper))
+    application.add_handler(CommandHandler("createquiz", create_quiz_wrapper))
+    application.add_handler(CommandHandler("stats", stats_command_wrapper))
+    application.add_handler(CommandHandler("broadcast", broadcast_command_wrapper))
+    application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
+    application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
+    application.add_handler(CommandHandler("token", token_command))  # Changed to token
+    application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
     
     # Start polling
     logger.info("Starting Telegram bot in polling mode...")
