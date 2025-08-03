@@ -8,7 +8,9 @@ import asyncio
 import html
 import secrets
 import string
+import random
 import requests
+import aiohttp
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import (
@@ -31,7 +33,12 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "6.2"  # Improved token system with API integration
+BOT_VERSION = "7.0"  # Improved token system with API integration
+temp_params = {}  # Temporary storage for verification params
+
+# API Configuration
+AD_API = os.getenv('AD_API', '446b3a3f0039a2826f1483f22e9080963974ad3b')
+WEBSITE_URL = os.getenv('WEBSITE_URL', 'upshrink.com')
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Enhanced HTTP handler for health checks and monitoring"""
@@ -163,6 +170,17 @@ def get_db():
         logger.error(f"MongoDB connection error: {e}")
         return None
 
+# Create TTL index for token expiration
+def create_ttl_index():
+    try:
+        db = get_db()
+        if db:
+            tokens = db.tokens
+            tokens.create_index("expires_at", expireAfterSeconds=0)
+            logger.info("Created TTL index for token expiration")
+    except Exception as e:
+        logger.error(f"Error creating TTL index: {e}")
+
 # Record user interaction
 async def record_user_interaction(update: Update):
     try:
@@ -193,10 +211,28 @@ async def record_user_interaction(update: Update):
     except Exception as e:
         logger.error(f"Error saving user data: {e}")
 
-# Generate a secure token
-def generate_token(length=8):
+# Generate a random parameter
+def generate_random_param(length=8):
+    """Generate a random parameter for verification"""
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+# Get shortened URL using ad_api service
+async def get_shortened_url(deep_link):
+    """Shorten URL using ad_api service"""
+    try:
+        api_url = f"https://{WEBSITE_URL}/api?api={AD_API}&url={deep_link}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("status") == "success":
+                        return data.get("shortenedUrl")
+        return None
+    except Exception as e:
+        logger.error(f"URL shortening failed: {e}")
+        return None
 
 # Check if user is sudo
 def is_sudo(user_id):
@@ -215,70 +251,7 @@ async def has_valid_token(user_id):
     tokens = db.tokens
     token_data = tokens.find_one({"user_id": user_id})
     
-    if not token_data:
-        return False
-        
-    # Check if token is expired
-    expires_at = token_data.get("expires_at")
-    if expires_at and datetime.utcnow() < expires_at:
-        return True
-        
-    # Remove expired token
-    tokens.delete_one({"user_id": user_id})
-    return False
-
-# Shorten URL using ad_api service
-def shorten_url(url):
-    """Shorten URL using ad_api service with API key"""
-    try:
-        api_key = os.getenv('SHORTENER_API_KEY', '446b3a3f0039a2826f1483f22e9080963974ad3b')
-        api_url = os.getenv('SHORTENER_API_URL', 'https://upshrink.com/api/shorten')
-        
-        params = {"url": url}
-        if api_key:
-            params['api_key'] = api_key
-        
-        response = requests.get(
-            api_url,
-            params=params,
-            timeout=10
-        )
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("short_url", url)
-    except Exception as e:
-        logger.error(f"URL shortening failed: {e}")
-    return url
-
-# Create or renew token
-async def create_token(user_id):
-    db = get_db()
-    if not db:
-        return None, None
-        
-    tokens = db.tokens
-    expires_at = datetime.utcnow() + timedelta(hours=24)
-    token_value = generate_token()
-    
-    token_data = {
-        "user_id": user_id,
-        "token": token_value,
-        "created_at": datetime.utcnow(),
-        "expires_at": expires_at
-    }
-    
-    tokens.update_one(
-        {"user_id": user_id},
-        {"$set": token_data},
-        upsert=True
-    )
-    
-    # Create activation URL
-    bot_username = os.getenv('BOT_USERNAME', 'your_bot')
-    activation_url = f"https://t.me/{bot_username}?start={token_value}"
-    short_url = shorten_url(activation_url)
-    
-    return token_value, short_url
+    return token_data is not None  # TTL index handles expiration
 
 # Token command
 async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -296,47 +269,53 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Check if user already has valid token
     if await has_valid_token(user_id):
-        db = get_db()
-        if db:
-            tokens = db.tokens
-            token_data = tokens.find_one({"user_id": user_id})
-            if token_data:
-                expires_at = token_data["expires_at"]
-                remaining = expires_at - datetime.utcnow()
-                hours = int(remaining.total_seconds() // 3600)
-                minutes = int((remaining.total_seconds() % 3600) // 60)
-                
-                # Create activation URL
-                bot_username = os.getenv('BOT_USERNAME', 'your_bot')
-                activation_url = f"https://t.me/{bot_username}?start={token_data['token']}"
-                short_url = shorten_url(activation_url)
-                
-                await update.message.reply_text(
-                    f"🔑 You already have a valid token!\n\n"
-                    f"• Token: `{token_data['token']}`\n"
-                    f"• Activation: {short_url}\n"
-                    f"• Expires in: {hours} hours {minutes} minutes\n\n"
-                    f"Share this link to activate on other devices.",
-                    parse_mode='Markdown'
-                )
-                return
+        await update.message.reply_text(
+            "✅ Your free session is already active! Enjoy your access.",
+            parse_mode='Markdown'
+        )
+        return
     
-    # Create new token
-    token, short_url = await create_token(user_id)
-    if token and short_url:
+    # Generate new verification param
+    param = generate_random_param()
+    temp_params[user_id] = param
+    
+    # Create deep link
+    bot_username = os.getenv('BOT_USERNAME', context.bot.username)
+    deep_link = f"https://t.me/{bot_username}?start={param}"
+    
+    # Get shortened URL
+    short_url = await get_shortened_url(deep_link)
+    if not short_url:
         await update.message.reply_text(
-            f"🎉 Your 24-hour access token is ready!\n\n"
-            f"• Token: `{token}`\n"
-            f"• Activation: {short_url}\n\n"
-            f"Click the link or send /start {token} to activate.\n"
-            f"Valid for 24 hours ⏳",
+            "⚠️ Failed to generate verification link. Please try again.",
             parse_mode='Markdown'
         )
-    else:
-        await update.message.reply_text(
-            "⚠️ Failed to generate token. Please try again later.",
-            parse_mode='Markdown'
+        return
+    
+    # Create response message
+    response_text = (
+        "🔑 Click the button below to verify your free access token:\n\n"
+        "✨ <b>What you'll get:</b>\n"
+        "1. Full access for 3 hours\n"
+        "2. Increased command limits\n"
+        "3. All features unlocked\n\n"
+        "This link is valid for 5 minutes"
+    )
+    
+    # Create inline button
+    keyboard = [[
+        InlineKeyboardButton(
+            "✅ Verify Token Now",
+            url=short_url
         )
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        response_text,
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
 
 # Token verification helper
 async def check_token_or_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE, handler):
@@ -353,49 +332,39 @@ async def check_token_or_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # Wrapper functions for token verification
 async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Special handling for token activation
+    # Handle token activation
     if context.args and context.args[0]:
         token = context.args[0]
         user = update.effective_user
         user_id = user.id
         
-        db = get_db()
-        if db:
-            tokens = db.tokens
-            token_data = tokens.find_one({"token": token})
+        # Check if it's a verification token
+        if user_id in temp_params and temp_params[user_id] == token:
+            # Store token in database
+            db = get_db()
+            if db:
+                tokens = db.tokens
+                tokens.update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "token": token,
+                        "created_at": datetime.utcnow(),
+                        "expires_at": datetime.utcnow() + timedelta(hours=3)
+                    }},
+                    upsert=True
+                )
             
-            if token_data:
-                # Only allow token activation for the user who generated it
-                if token_data.get("user_id") != user_id:
-                    await update.message.reply_text(
-                        "⚠️ This token belongs to another user. "
-                        "Only the token owner can activate it.",
-                        parse_mode='Markdown'
-                    )
-                    return
-                
-                # Check if token is expired
-                expires_at = token_data.get("expires_at")
-                if expires_at and datetime.utcnow() < expires_at:
-                    # Update last used time
-                    tokens.update_one(
-                        {"token": token},
-                        {"$set": {"last_used": datetime.utcnow()}}
-                    )
-                    await update.message.reply_text(
-                        "✅ Token activated successfully!\n"
-                        "You now have full access to bot features for 24 hours.",
-                        parse_mode='Markdown'
-                    )
-                    return await start(update, context)
-                else:
-                    # Token expired
-                    tokens.delete_one({"token": token})
-        
-        await update.message.reply_text(
-            "⚠️ Invalid or expired token. Use /token to get a new one.",
-            parse_mode='Markdown'
-        )
+            # Remove temp param and notify user
+            del temp_params[user_id]
+            await update.message.reply_text(
+                "✅ Token activated successfully! Enjoy your 3-hour access.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ Invalid or expired verification token. Generate a new one with /token.",
+                parse_mode='Markdown'
+            )
         return
     
     # Skip token check for the start command itself
@@ -426,15 +395,24 @@ async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     """Send welcome message and instructions"""
-    await update.message.reply_text(
+    welcome_msg = (
         "🌟 *Welcome to Quiz Bot!* 🌟\n\n"
         "I can turn your text files into interactive 10-second quizzes!\n\n"
         "🔹 Use /createquiz - Start quiz creation\n"
         "🔹 Use /help - Show formatting guide\n"
         "🔹 Use /token - Get your access token\n\n"
-        "Let's make learning fun!",
-        parse_mode='Markdown'
     )
+    
+    # Add token status for non-sudo users
+    if not is_sudo(update.effective_user.id):
+        welcome_msg += (
+            "🔒 You need a token to access all features\n"
+            "Get your free token with /token - Valid for 3 hours\n\n"
+        )
+    
+    welcome_msg += "Let's make learning fun!"
+    
+    await update.message.reply_text(welcome_msg, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
@@ -590,6 +568,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         users = db.users
         total_users = users.count_documents({})
         
+        # Get token usage stats
+        tokens = db.tokens
+        active_tokens = tokens.count_documents({})
+        
         # Ping calculation
         start_time = time.time()
         ping_msg = await update.message.reply_text("🏓 Pong!")
@@ -603,6 +585,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         stats_message = (
             f"📊 *Bot Statistics*\n\n"
             f"• Total Users: `{total_users}`\n"
+            f"• Active Tokens: `{active_tokens}`\n"
             f"• Current Ping: `{ping_time:.2f} ms`\n"
             f"• Uptime: `{uptime}`\n"
             f"• Version: `{BOT_VERSION}`\n\n"
@@ -806,6 +789,9 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def main() -> None:
     """Run the bot and HTTP server"""
+    # Create TTL index for token expiration
+    create_ttl_index()
+    
     # Get port from environment (Render provides this)
     PORT = int(os.environ.get('PORT', 10000))
     logger.info(f"Starting HTTP server on port {PORT}")
