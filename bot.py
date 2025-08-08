@@ -32,12 +32,13 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "7.2"  # 24-hour tokens with performance improvements
+BOT_VERSION = "7.3"  # Added sudo management and tutorial
 temp_params = {}  # Temporary storage for verification params
 
 # API Configuration
 AD_API = os.getenv('AD_API', '446b3a3f0039a2826f1483f22e9080963974ad3b')
 WEBSITE_URL = os.getenv('WEBSITE_URL', 'upshrink.com')
+YOUTUBE_TUTORIAL = "https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht"  # Added tutorial link
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Enhanced HTTP handler for health checks and monitoring"""
@@ -180,6 +181,17 @@ def create_ttl_index():
     except Exception as e:
         logger.error(f"Error creating TTL index: {e}")
 
+# Create index for sudo users
+def create_sudo_index():
+    try:
+        db = get_db()
+        if db is not None:
+            sudo_users = db.sudo_users
+            sudo_users.create_index("user_id", unique=True)
+            logger.info("Created index for sudo_users")
+    except Exception as e:
+        logger.error(f"Error creating sudo index: {e}")
+
 # Record user interaction
 async def record_user_interaction(update: Update):
     try:
@@ -240,22 +252,17 @@ async def get_shortened_url(deep_link):
 
 # Check if user is sudo
 def is_sudo(user_id):
+    """Check if user is sudo (owner or in sudo list)"""
     owner_id = os.getenv('OWNER_ID')
-    return owner_id and str(user_id) == owner_id
-
-# Check if user has valid token
-async def has_valid_token(user_id):
-    if is_sudo(user_id):
+    if owner_id and str(user_id) == owner_id:
         return True
         
     db = get_db()
     if db is None:
         return False
         
-    tokens = db.tokens
-    token_data = tokens.find_one({"user_id": user_id})
-    
-    return token_data is not None  # TTL index handles expiration
+    sudo_users = db.sudo_users
+    return sudo_users.find_one({"user_id": user_id}) is not None
 
 # Token command
 async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -411,16 +418,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_sudo(update.effective_user.id):
         welcome_msg += (
             "🔒 You need a token to access all features\n"
-            "Get your access token with /token - Valid for 24 hours\n\n"  # Updated duration
+            "Get your access token with /token - Valid for 24 hours\n\n"
         )
     
     welcome_msg += "Let's make learning fun!"
     
-    await update.message.reply_text(welcome_msg, parse_mode='Markdown')
+    # Create keyboard with tutorial button
+    keyboard = [[
+        InlineKeyboardButton(
+            "🎥 Watch Tutorial",
+            url=YOUTUBE_TUTORIAL
+        )
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        welcome_msg, 
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     """Show detailed formatting instructions"""
+    # Create keyboard with tutorial button
+    keyboard = [[
+        InlineKeyboardButton(
+            "🎥 Watch Tutorial",
+            url=YOUTUBE_TUTORIAL
+        )
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
         "📝 *Quiz File Format Guide:*\n\n"
         "```\n"
@@ -443,7 +472,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Exactly 4 options (any prefix format accepted)\n"
         "• Answer format: 'Answer: <1-4>' (1=first option, 2=second, etc.)\n"
         "• Optional 7th line for explanation (any text)",
-        parse_mode='Markdown'
+        parse_mode='Markdown',
+        reply_markup=reply_markup
     )
 
 async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -584,6 +614,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         tokens = db.tokens
         active_tokens = tokens.count_documents({})
         
+        # Get sudo users count
+        sudo_users = db.sudo_users
+        sudo_count = sudo_users.count_documents({})
+        
         # Ping calculation
         start_time = time.time()
         ping_msg = await update.message.reply_text("🏓 Pong!")
@@ -598,6 +632,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"📊 *Bot Statistics*\n\n"
             f"• Total Users: `{total_users}`\n"
             f"• Active Tokens: `{active_tokens}`\n"
+            f"• Sudo Users: `{sudo_count}`\n"
             f"• Current Ping: `{ping_time:.2f} ms`\n"
             f"• Uptime: `{uptime}`\n"
             f"• Version: `{BOT_VERSION}`\n\n"
@@ -799,10 +834,114 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     else:
         await update.message.reply_text("ℹ️ No pending broadcast to cancel.")
 
+# Sudo management commands
+async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add user to sudo list (owner only)"""
+    await record_user_interaction(update)
+    
+    # Verify owner
+    owner_id = os.getenv('OWNER_ID')
+    if not owner_id or str(update.effective_user.id) != owner_id:
+        await update.message.reply_text("🚫 This command is only available to the bot owner.")
+        return
+        
+    # Get target user
+    target_user = None
+    if context.args:
+        try:
+            target_user = int(context.args[0])
+        except ValueError:
+            pass
+    elif update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user.id
+    
+    if not target_user:
+        await update.message.reply_text(
+            "ℹ️ Usage:\n"
+            "Reply to user's message with /addsudo\n"
+            "Or use /addsudo <user_id>"
+        )
+        return
+        
+    # Add to sudo list
+    db = get_db()
+    if db is None:
+        await update.message.reply_text("⚠️ Database connection error")
+        return
+        
+    sudo_users = db.sudo_users
+    result = sudo_users.update_one(
+        {"user_id": target_user},
+        {"$set": {"user_id": target_user, "added_at": datetime.utcnow()}},
+        upsert=True
+    )
+    
+    if result.upserted_id or result.modified_count:
+        await update.message.reply_text(f"✅ Added user {target_user} to sudo list!")
+    else:
+        await update.message.reply_text("⚠️ Failed to add user to sudo list")
+
+async def rem_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove user from sudo list (owner only)"""
+    await record_user_interaction(update)
+    
+    # Verify owner
+    owner_id = os.getenv('OWNER_ID')
+    if not owner_id or str(update.effective_user.id) != owner_id:
+        await update.message.reply_text("🚫 This command is only available to the bot owner.")
+        return
+        
+    # Get target user
+    target_user = None
+    if context.args:
+        try:
+            target_user = int(context.args[0])
+        except ValueError:
+            pass
+    elif update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user.id
+    
+    if not target_user:
+        await update.message.reply_text(
+            "ℹ️ Usage:\n"
+            "Reply to user's message with /remsudo\n"
+            "Or use /remsudo <user_id>"
+        )
+        return
+        
+    # Remove from sudo list
+    db = get_db()
+    if db is None:
+        await update.message.reply_text("⚠️ Database connection error")
+        return
+        
+    sudo_users = db.sudo_users
+    result = sudo_users.delete_one({"user_id": target_user})
+    
+    if result.deleted_count:
+        await update.message.reply_text(f"✅ Removed user {target_user} from sudo list!")
+    else:
+        await update.message.reply_text("⚠️ User not found in sudo list")
+
+# Check if user has valid token
+async def has_valid_token(user_id):
+    if is_sudo(user_id):
+        return True
+        
+    db = get_db()
+    if db is None:
+        return False
+        
+    tokens = db.tokens
+    token_data = tokens.find_one({"user_id": user_id})
+    
+    return token_data is not None  # TTL index handles expiration
+
 def main() -> None:
     """Run the bot and HTTP server"""
-    # Create TTL index for token expiration
+    # Create database indexes
     create_ttl_index()
+    create_sudo_index()
     
     # Get port from environment (Render provides this)
     PORT = int(os.environ.get('PORT', 10000))
@@ -832,6 +971,10 @@ def main() -> None:
     application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
     application.add_handler(CommandHandler("token", token_command))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
+    
+    # Add sudo management commands
+    application.add_handler(CommandHandler("addsudo", add_sudo))
+    application.add_handler(CommandHandler("remsudo", rem_sudo))
     
     # Start polling
     logger.info("Starting Telegram bot in polling mode...")
