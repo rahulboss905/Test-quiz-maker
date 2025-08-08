@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = 123456789  # Replace with your admin ID
+ADMIN_ID = 7456681709  # Replace with your admin ID
 SUDO_FILE = "sudo_users.json"  # File to store sudo users
 TOKENS_FILE = "tokens.json"
 QUIZZES_FILE = "quizzes.json"
