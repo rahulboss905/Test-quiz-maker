@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = 123456789  # Replace with your admin ID
-SUDO_USERS = {ADMIN_ID}  # Add more sudo user IDs as needed
+SUDO_FILE = "sudo_users.json"  # File to store sudo users
 TOKENS_FILE = "tokens.json"
 QUIZZES_FILE = "quizzes.json"
 USERS_FILE = "users.json"
@@ -32,6 +32,23 @@ TOKEN_PRICE = 50  # Points needed to get a token
 
 # Conversation states
 QUIZ_QUESTION, QUIZ_OPTIONS, QUIZ_CORRECT, QUIZ_CONFIRM = range(4)
+
+# Load sudo users from file
+def load_sudo_users():
+    try:
+        with open(SUDO_FILE, "r") as f:
+            data = json.load(f)
+            return set(data.get("sudo_users", [ADMIN_ID]))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {ADMIN_ID}
+
+# Save sudo users to file
+def save_sudo_users(sudo_users):
+    with open(SUDO_FILE, "w") as f:
+        json.dump({"sudo_users": list(sudo_users)}, f)
+
+# Initialize sudo users
+SUDO_USERS = load_sudo_users()
 
 # Load data functions
 def load_data(file):
@@ -128,6 +145,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/leaderboard - Show top users\n\n"
         "🔧 Admin Commands:\n"
         "/add_tokens [user_id] [amount] - Add tokens to a user\n"
+        "/addsudo [user_id/@username] - Add user to sudo list\n"
+        "/removesudo [user_id] - Remove user from sudo list\n"
         "/broadcast [message] - Send message to all users\n\n"
         "Check out our tutorial video for a complete guide:"
     )
@@ -297,10 +316,13 @@ async def tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_tokens = tokens.get(str(user_id), 0)
     
-    status = "🌟 Sudo User (Unlimited)" if user_id in SUDO_USERS else f"Tokens: {user_tokens}"
+    if user_id in SUDO_USERS:
+        status = "🌟 Sudo User (Unlimited Quizzes)"
+    else:
+        status = f"🔑 Tokens: {user_tokens}"
     
     await update.message.reply_text(
-        f"🔑 Your Token Status:\n\n"
+        f"🔑 Your Account Status:\n\n"
         f"{status}\n\n"
         f"Get more tokens with /get_token"
     )
@@ -399,6 +421,86 @@ async def add_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid input. Usage: /add_tokens <user_id> <amount>")
 
+async def addsudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /addsudo <user_id or @username>")
+        return
+    
+    identifier = context.args[0].strip()
+    user_id = None
+    
+    # Check if it's a username
+    if identifier.startswith("@"):
+        username = identifier[1:]
+        # Search through users to find matching username
+        for uid, data in users.items():
+            try:
+                user_chat = await context.bot.get_chat(int(uid))
+                if user_chat.username and user_chat.username.lower() == username.lower():
+                    user_id = int(uid)
+                    break
+            except:
+                continue
+        
+        if not user_id:
+            await update.message.reply_text(f"❌ User @{username} not found in bot's user list")
+            return
+    # Check if it's a user ID
+    else:
+        try:
+            user_id = int(identifier)
+        except ValueError:
+            await update.message.reply_text("❌ Invalid input. Provide user ID or @username")
+            return
+    
+    # Add to sudo users
+    if user_id in SUDO_USERS:
+        await update.message.reply_text(f"ℹ️ User {user_id} is already a sudo user")
+        return
+    
+    SUDO_USERS.add(user_id)
+    save_sudo_users(SUDO_USERS)
+    
+    try:
+        user_chat = await context.bot.get_chat(user_id)
+        user_name = user_chat.username or user_chat.first_name
+        await update.message.reply_text(f"✅ Added {user_name} ({user_id}) to sudo users!")
+    except:
+        await update.message.reply_text(f"✅ Added user ID {user_id} to sudo users!")
+
+async def removesudo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /removesudo <user_id>")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+        return
+    
+    if user_id not in SUDO_USERS:
+        await update.message.reply_text(f"ℹ️ User {user_id} is not a sudo user")
+        return
+    
+    SUDO_USERS.remove(user_id)
+    save_sudo_users(SUDO_USERS)
+    
+    try:
+        user_chat = await context.bot.get_chat(user_id)
+        user_name = user_chat.username or user_chat.first_name
+        await update.message.reply_text(f"✅ Removed {user_name} ({user_id}) from sudo users")
+    except:
+        await update.message.reply_text(f"✅ Removed user ID {user_id} from sudo users")
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Only admin can use this command!")
@@ -450,6 +552,8 @@ def main():
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
     application.add_handler(CommandHandler("add_tokens", add_tokens))
+    application.add_handler(CommandHandler("addsudo", addsudo))
+    application.add_handler(CommandHandler("removesudo", removesudo))
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CallbackQueryHandler(quiz_answer, pattern=r"^quiz_"))
     
