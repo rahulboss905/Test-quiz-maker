@@ -1,847 +1,460 @@
 import os
+import json
 import logging
-import threading
-import time
-import socket
-import traceback
-import asyncio
-import html
-import secrets
-import string
 import random
-import aiohttp
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import re
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     filters,
-    ContextTypes
+    ConversationHandler,
+    CallbackQueryHandler
 )
-from telegram.error import RetryAfter, BadRequest
-from pymongo import MongoClient
-from datetime import datetime, timedelta
 
-# Configure logging
+# Enable logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Global variables
-bot_start_time = time.time()
-BOT_VERSION = "7.2"  # 24-hour tokens with performance improvements
-temp_params = {}  # Temporary storage for verification params
+# Configuration
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = 123456789  # Replace with your admin ID
+SUDO_USERS = {ADMIN_ID}  # Add more sudo user IDs as needed
+TOKENS_FILE = "tokens.json"
+QUIZZES_FILE = "quizzes.json"
+USERS_FILE = "users.json"
+TOKEN_PRICE = 50  # Points needed to get a token
 
-# API Configuration
-AD_API = os.getenv('AD_API', '446b3a3f0039a2826f1483f22e9080963974ad3b')
-WEBSITE_URL = os.getenv('WEBSITE_URL', 'upshrink.com')
+# Conversation states
+QUIZ_QUESTION, QUIZ_OPTIONS, QUIZ_CORRECT, QUIZ_CONFIRM = range(4)
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Enhanced HTTP handler for health checks and monitoring"""
-    
-    server_version = f"TelegramQuizBot/{BOT_VERSION}"
-    
-    def do_GET(self):
-        try:
-            start_time = time.time()
-            client_ip = self.client_address[0]
-            user_agent = self.headers.get('User-Agent', 'Unknown')
-            
-            logger.info(f"Health check request: {self.path} from {client_ip} ({user_agent})")
-            
-            # Handle all valid endpoints
-            if self.path in ['/', '/health', '/status']:
-                # Simple plain text response for monitoring services
-                response_text = "OK"
-                content_type = "text/plain"
-                
-                # Detailed HTML response for browser requests
-                if "Mozilla" in user_agent:  # Browser detection
-                    status = "🟢 Bot is running"
-                    uptime = time.time() - self.server.start_time
-                    hostname = socket.gethostname()
-                    
-                    response_text = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quiz Bot Status</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .container {{ max-width: 800px; margin: 0 auto; }}
-        .status {{ font-size: 1.5em; font-weight: bold; color: #2ecc71; }}
-        .info {{ margin-top: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 5px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Telegram Quiz Bot Status</h1>
-        <div class="status">{status}</div>
-        
-        <div class="info">
-            <p><strong>Hostname:</strong> {hostname}</p>
-            <p><strong>Uptime:</strong> {uptime:.2f} seconds</p>
-            <p><strong>Version:</strong> {BOT_VERSION}</p>
-            <p><strong>Last Check:</strong> {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</p>
-            <p><strong>Client IP:</strong> {client_ip}</p>
-            <p><strong>User Agent:</strong> {user_agent}</p>
-        </div>
-        
-        <p style="margin-top: 30px;">
-            <a href="https://t.me/{os.getenv('BOT_USERNAME', 'your_bot')}" target="_blank">
-                Contact the bot on Telegram
-            </a>
-        </p>
-    </div>
-</body>
-</html>
-                    """
-                    content_type = "text/html"
-                
-                # Send response
-                response = response_text.encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-type', content_type)
-                self.send_header('Content-Length', str(len(response)))
-                self.end_headers()
-                self.wfile.write(response)
-                
-                # Log successful request
-                duration = (time.time() - start_time) * 1000
-                logger.info(f"Health check passed - 200 OK - {duration:.2f}ms")
-            else:
-                self.send_response(404)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'404 Not Found')
-                logger.warning(f"Invalid path requested: {self.path}")
-                
-        except Exception as e:
-            logger.error(f"Health check error: {e}")
-            self.send_response(500)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'500 Internal Server Error')
-
-    def log_message(self, format, *args):
-        """Override to prevent default logging"""
-        pass
-
-def run_http_server(port=8080):
-    """Run HTTP server in a separate thread"""
+# Load data functions
+def load_data(file):
     try:
-        server_address = ('0.0.0.0', port)
-        httpd = HTTPServer(server_address, HealthCheckHandler)
-        
-        # Add start time to server instance
-        httpd.start_time = time.time()
-        
-        logger.info(f"HTTP server running on port {port}")
-        logger.info(f"Access URLs:")
-        logger.info(f"  http://localhost:{port}/")
-        logger.info(f"  http://localhost:{port}/health")
-        logger.info(f"  http://localhost:{port}/status")
-        
-        httpd.serve_forever()
-    except Exception as e:
-        logger.critical(f"Failed to start HTTP server: {e}")
-        time.sleep(5)
-        run_http_server(port)
+        with open(file, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        if "token" in file:
+            return {"tokens": {}, "last_request": {}}
+        return {}
 
-# MongoDB connection function
-def get_db():
-    try:
-        mongo_uri = os.getenv('MONGO_URI')
-        if not mongo_uri:
-            logger.error("MONGO_URI environment variable not set")
-            return None
-            
-        client = MongoClient(mongo_uri)
-        client.admin.command('ping')  # Test connection
-        logger.info("MongoDB connection successful")
-        return client.telegram_bot
-    except Exception as e:
-        logger.error(f"MongoDB connection error: {e}")
-        return None
+def save_data(data, file):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=4)
 
-# Create TTL index for token expiration
-def create_ttl_index():
-    try:
-        db = get_db()
-        if db is not None:
-            tokens = db.tokens
-            tokens.create_index("expires_at", expireAfterSeconds=0)
-            logger.info("Created TTL index for token expiration")
-    except Exception as e:
-        logger.error(f"Error creating TTL index: {e}")
+# Load initial data
+tokens_data = load_data(TOKENS_FILE)
+quizzes = load_data(QUIZZES_FILE)
+users = load_data(USERS_FILE)
 
-# Record user interaction
-async def record_user_interaction(update: Update):
-    try:
-        db = get_db()
-        if db is None:
-            return
-            
-        user = update.effective_user
-        if not user:
-            return
-            
-        users = db.users
-        user_data = {
-            "user_id": user.id,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "username": user.username,
-            "last_interaction": datetime.utcnow()
-        }
-        
-        # Update or insert user record
-        users.update_one(
-            {"user_id": user.id},
-            {"$set": user_data},
-            upsert=True
-        )
-        logger.info(f"Recorded interaction for user {user.id}")
-    except Exception as e:
-        logger.error(f"Error saving user data: {e}")
+# Initialize data structures
+tokens = tokens_data.get("tokens", {})
+last_token_request = tokens_data.get("last_request", {})
+quizzes = quizzes if quizzes else {}
+users = users if users else {}
 
-# Generate a random parameter
-def generate_random_param(length=8):
-    """Generate a random parameter for verification"""
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
+# Helper functions
+def has_tokens(user_id):
+    user_id = str(user_id)
+    return tokens.get(user_id, 0) > 0
 
-# Get shortened URL using ad_api service
-async def get_shortened_url(deep_link):
-    """Shorten URL using ad_api service"""
-    try:
-        api_url = f"https://{WEBSITE_URL}/api?api={AD_API}&url={deep_link}"
-        
-        # Use timeout to prevent hanging
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(api_url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("status") == "success":
-                        return data.get("shortenedUrl")
-        return None
-    except asyncio.TimeoutError:
-        logger.warning("URL shortening timed out")
-        return None
-    except Exception as e:
-        logger.error(f"URL shortening failed: {e}")
-        return None
-
-# Check if user is sudo
-def is_sudo(user_id):
-    owner_id = os.getenv('OWNER_ID')
-    return owner_id and str(user_id) == owner_id
-
-# Check if user has valid token
-async def has_valid_token(user_id):
-    if is_sudo(user_id):
+def use_token(user_id):
+    user_id = str(user_id)
+    if tokens.get(user_id, 0) > 0:
+        tokens[user_id] -= 1
+        save_data({"tokens": tokens, "last_request": last_token_request}, TOKENS_FILE)
         return True
-        
-    db = get_db()
-    if db is None:
-        return False
-        
-    tokens = db.tokens
-    token_data = tokens.find_one({"user_id": user_id})
-    
-    return token_data is not None  # TTL index handles expiration
+    return False
 
-# Token command
-async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    user = update.effective_user
-    user_id = user.id
+def add_user(user_id):
+    user_id = str(user_id)
+    if user_id not in users:
+        users[user_id] = {"points": 0, "quizzes_taken": 0, "quizzes_created": 0}
+        save_data(users, USERS_FILE)
+
+def add_points(user_id, points):
+    user_id = str(user_id)
+    users[user_id]["points"] += points
+    save_data(users, USERS_FILE)
+
+def add_quiz_created(user_id):
+    user_id = str(user_id)
+    users[user_id]["quizzes_created"] += 1
+    save_data(users, USERS_FILE)
+
+def add_quiz_taken(user_id):
+    user_id = str(user_id)
+    users[user_id]["quizzes_taken"] += 1
+    save_data(users, USERS_FILE)
+
+# Command handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    add_user(user_id)
     
-    # Sudo users don't need tokens
-    if is_sudo(user_id):
-        await update.message.reply_text(
-            "🌟 You are a sudo user! You don't need a token to use the bot.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Check if user already has valid token
-    if await has_valid_token(user_id):
-        await update.message.reply_text(
-            "✅ Your access token is already active! Enjoy your 24-hour access.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Generate new verification param
-    param = generate_random_param()
-    temp_params[user_id] = param
-    
-    # Create deep link
-    bot_username = os.getenv('BOT_USERNAME', context.bot.username)
-    deep_link = f"https://t.me/{bot_username}?start={param}"
-    
-    # Get shortened URL
-    short_url = await get_shortened_url(deep_link)
-    if not short_url:
-        await update.message.reply_text(
-            "⚠️ Failed to generate verification link. Please try again.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Create response message
-    response_text = (
-        "🔑 Click the button below to verify your access token:\n\n"
-        "✨ <b>What you'll get:</b>\n"
-        "1. Full access for 24 hours\n"
-        "2. Increased command limits\n"
-        "3. All features unlocked\n\n"
-        "This link is valid for 5 minutes"
-    )
-    
-    # Create inline button
-    keyboard = [[
-        InlineKeyboardButton(
-            "✅ Verify Token Now",
-            url=short_url
-        )
-    ]]
+    keyboard = [
+        [InlineKeyboardButton("📺 Watch Tutorial Video", url="https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        response_text,
-        parse_mode='HTML',
+        "🌟 Welcome to QuizBot! 🌟\n\n"
+        "Create your own quizzes with /create\n"
+        "Take quizzes with /quiz\n\n"
+        "Watch our tutorial video to learn how to create amazing quizzes:",
         reply_markup=reply_markup
     )
 
-# Token verification helper
-async def check_token_or_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE, handler):
-    """Check if user is sudo or has valid token"""
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎥 Watch Tutorial", url="https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    help_text = (
+        "📚 QuizBot Help:\n\n"
+        "/start - Start the bot\n"
+        "/help - Show this help message\n"
+        "/create - Create a new quiz (requires token)\n"
+        "/quiz - Take a random quiz\n"
+        "/tokens - Show your available tokens\n"
+        "/get_token - Request a token\n"
+        "/stats - Show bot statistics\n"
+        "/leaderboard - Show top users\n\n"
+        "🔧 Admin Commands:\n"
+        "/add_tokens [user_id] [amount] - Add tokens to a user\n"
+        "/broadcast [message] - Send message to all users\n\n"
+        "Check out our tutorial video for a complete guide:"
+    )
+    
+    await update.message.reply_text(help_text, reply_markup=reply_markup)
+
+async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if is_sudo(user_id) or await has_valid_token(user_id):
-        return await handler(update, context)
+    
+    # Sudo users bypass token requirement
+    if user_id not in SUDO_USERS:
+        if not has_tokens(user_id):
+            await update.message.reply_text(
+                "❌ You need a token to create quizzes!\n"
+                "Use /get_token to request one."
+            )
+            return False
     
     await update.message.reply_text(
-        "🔒 Access restricted! You need a valid token to use this feature.\n\n"
-        "Use /token to get your access token.",
-        parse_mode='Markdown'
+        "📝 Let's create a new quiz!\n\n"
+        "Please send your question:"
     )
+    return QUIZ_QUESTION
 
-# Wrapper functions for token verification
-async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Handle token activation
-    if context.args and context.args[0]:
-        token = context.args[0]
-        user = update.effective_user
-        user_id = user.id
-        
-        # Check if it's a verification token
-        if user_id in temp_params and temp_params[user_id] == token:
-            # Store token in database
-            db = get_db()
-            if db is not None:
-                tokens = db.tokens
-                tokens.update_one(
-                    {"user_id": user_id},
-                    {"$set": {
-                        "token": token,
-                        "created_at": datetime.utcnow(),
-                        "expires_at": datetime.utcnow() + timedelta(hours=24)  # Changed to 24 hours
-                    }},
-                    upsert=True
-                )
-            
-            # Remove temp param and notify user
-            del temp_params[user_id]
-            await update.message.reply_text(
-                "✅ Token activated successfully! Enjoy your 24-hour access.",  # Updated message
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                "⚠️ Invalid or expired verification token. Generate a new one with /token.",
-                parse_mode='Markdown'
-            )
-        return
-    
-    # Skip token check for the start command itself
-    await start(update, context)
-
-async def help_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, help_command)
-
-async def create_quiz_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, create_quiz)
-
-async def stats_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, stats_command)
-
-async def broadcast_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, broadcast_command)
-
-async def confirm_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, confirm_broadcast)
-
-async def cancel_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, cancel_broadcast)
-
-async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, handle_document)
-
-# Original command handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    """Send welcome message and instructions"""
-    welcome_msg = (
-        "🌟 *Welcome to Quiz Bot!* 🌟\n\n"
-        "I can turn your text files into interactive 10-second quizzes!\n\n"
-        "🔹 Use /createquiz - Start quiz creation\n"
-        "🔹 Use /help - Show formatting guide\n"
-        "🔹 Use /token - Get your access token\n\n"
-    )
-    
-    # Add token status for non-sudo users
-    if not is_sudo(update.effective_user.id):
-        welcome_msg += (
-            "🔒 You need a token to access all features\n"
-            "Get your access token with /token - Valid for 24 hours\n\n"  # Updated duration
-        )
-    
-    welcome_msg += "Let's make learning fun!"
-    
-    await update.message.reply_text(welcome_msg, parse_mode='Markdown')
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    """Show detailed formatting instructions"""
+async def quiz_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["quiz"] = {"question": update.message.text}
     await update.message.reply_text(
-        "📝 *Quiz File Format Guide:*\n\n"
-        "```\n"
-        "What is 2+2?\n"
-        "A) 3\n"
-        "B) 4\n"
-        "C) 5\n"
-        "D) 6\n"
-        "Answer: 2\n"
-        "The correct answer is 4\n\n"
-        "Python is a...\n"
-        "A. Snake\n"
-        "B. Programming language\n"
-        "C. Coffee brand\n"
-        "D. Movie\n"
-        "Answer: 2\n"
-        "```\n\n"
-        "📌 *Rules:*\n"
-        "• One question per block (separated by blank lines)\n"
-        "• Exactly 4 options (any prefix format accepted)\n"
-        "• Answer format: 'Answer: <1-4>' (1=first option, 2=second, etc.)\n"
-        "• Optional 7th line for explanation (any text)",
-        parse_mode='Markdown'
+        "📋 Great! Now send the options separated by commas.\n"
+        "Example: Option A, Option B, Option C, Option D"
     )
+    return QUIZ_OPTIONS
 
-async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    """Initiate quiz creation process"""
+async def quiz_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    options = [opt.strip() for opt in update.message.text.split(",") if opt.strip()]
+    
+    if len(options) < 2:
+        await update.message.reply_text("❌ Please provide at least 2 options.")
+        return QUIZ_OPTIONS
+    
+    context.user_data["quiz"]["options"] = options
+    
+    options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(options)])
     await update.message.reply_text(
-        "📤 *Ready to create your quiz!*\n\n"
-        "Please send me a .txt file containing your questions.\n\n"
-        "Need format help? Use /help",
-        parse_mode='Markdown'
+        f"📋 Options received:\n{options_text}\n\n"
+        "Now send the number of the correct option (1, 2, 3, ...):"
     )
+    return QUIZ_CORRECT
 
-def parse_quiz_file(content: str) -> tuple:
-    """Parse and validate quiz content"""
-    blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
-    valid_questions = []
-    errors = []
-    
-    for i, block in enumerate(blocks, 1):
-        lines = [line.strip() for line in block.split('\n') if line.strip()]
-        
-        if len(lines) not in (6, 7):
-            errors.append(f"❌ Question {i}: Invalid line count ({len(lines)}), expected 6 or 7")
-            continue
-            
-        question = lines[0]
-        options = lines[1:5]
-        answer_line = lines[5]
-        explanation = lines[6] if len(lines) == 7 else None
-        
-        # Validate answer format
-        answer_error = None
-        if not answer_line.lower().startswith('answer:'):
-            answer_error = "Missing 'Answer:' prefix"
-        else:
-            try:
-                answer_num = int(answer_line.split(':')[1].strip())
-                if not 1 <= answer_num <= 4:
-                    answer_error = f"Invalid answer number {answer_num}"
-            except (ValueError, IndexError):
-                answer_error = "Malformed answer line"
-        
-        if answer_error:
-            errors.append(f"❌ Q{i}: {answer_error}")
-        else:
-            option_texts = options
-            correct_id = int(answer_line.split(':')[1].strip()) - 1
-            valid_questions.append((question, option_texts, correct_id, explanation))
-    
-    return valid_questions, errors
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    """Process uploaded quiz file"""
-    if not update.message.document.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Please send a .txt file")
-        return
-    
+async def quiz_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Download file
-        file = await context.bot.get_file(update.message.document.file_id)
-        await file.download_to_drive('quiz.txt')
+        correct_index = int(update.message.text.strip()) - 1
+        options = context.user_data["quiz"]["options"]
         
-        with open('quiz.txt', 'r', encoding='utf-8') as f:
-            content = f.read()
+        if correct_index < 0 or correct_index >= len(options):
+            raise ValueError
         
-        # Parse and validate
-        valid_questions, errors = parse_quiz_file(content)
-        
-        # Report errors
-        if errors:
-            error_msg = "\n".join(errors[:5])
-            if len(errors) > 5:
-                error_msg += f"\n\n...and {len(errors)-5} more errors"
-            await update.message.reply_text(
-                f"⚠️ Found {len(errors)} error(s):\n\n{error_msg}"
-            )
-        
-        # Send quizzes
-        if valid_questions:
-            await update.message.reply_text(
-                f"✅ Sending {len(valid_questions)} quiz question(s)..."
-            )
-            
-            # Send all quizzes asynchronously
-            send_tasks = []
-            for question, options, correct_id, explanation in valid_questions:
-                try:
-                    poll_params = {
-                        "chat_id": update.effective_chat.id,
-                        "question": question,
-                        "options": options,
-                        "type": 'quiz',
-                        "correct_option_id": correct_id,
-                        "is_anonymous": False,
-                        "open_period": 10
-                    }
-                    
-                    if explanation:
-                        poll_params["explanation"] = explanation
-                    
-                    # Create task but don't await immediately
-                    task = context.bot.send_poll(**poll_params)
-                    send_tasks.append(task)
-                except Exception as e:
-                    logger.error(f"Poll creation error: {str(e)}")
-            
-            # Send all quizzes concurrently
-            await asyncio.gather(*send_tasks, return_exceptions=True)
-            
-        else:
-            await update.message.reply_text("❌ No valid questions found in file")
-            
-    except Exception as e:
-        logger.error(f"File processing error: {str(e)}")
-        await update.message.reply_text("⚠️ Error processing file. Please try again.")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
+        context.user_data["quiz"]["correct"] = correct_index
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Invalid option number. Please enter a valid number:")
+        return QUIZ_CORRECT
     
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        await update.message.reply_text("🚫 This command is only available to the bot owner.")
-        return
-
-    db = get_db()
-    if db is None:
-        await update.message.reply_text("⚠️ Database connection error. Stats unavailable.")
-        return
-        
-    try:
-        # Calculate stats
-        users = db.users
-        total_users = users.count_documents({})
-        
-        # Get token usage stats
-        tokens = db.tokens
-        active_tokens = tokens.count_documents({})
-        
-        # Ping calculation
-        start_time = time.time()
-        ping_msg = await update.message.reply_text("🏓 Pong!")
-        ping_time = (time.time() - start_time) * 1000
-        
-        # Uptime calculation
-        uptime_seconds = int(time.time() - bot_start_time)
-        uptime = str(timedelta(seconds=uptime_seconds))
-        
-        # Format stats message
-        stats_message = (
-            f"📊 *Bot Statistics*\n\n"
-            f"• Total Users: `{total_users}`\n"
-            f"• Active Tokens: `{active_tokens}`\n"
-            f"• Current Ping: `{ping_time:.2f} ms`\n"
-            f"• Uptime: `{uptime}`\n"
-            f"• Version: `{BOT_VERSION}`\n\n"
-            f"_Updated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}_"
-        )
-        
-        # Edit the ping message with full stats
-        await ping_msg.edit_text(stats_message, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Stats command error: {e}")
-        await update.message.reply_text("⚠️ Error retrieving statistics. Please try again later.")
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
+    quiz = context.user_data["quiz"]
+    confirmation_text = (
+        f"✅ Quiz Preview:\n\n"
+        f"Question: {quiz['question']}\n\n"
+        f"Options:\n" + "\n".join(
+            f"{i+1}. {opt} {'(Correct)' if i == quiz['correct'] else ''}" 
+            for i, opt in enumerate(quiz["options"])
+        ) + "\n\nDoes this look correct? (yes/no)"
+    )
     
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        await update.message.reply_text("🚫 This command is only available to the bot owner.")
-        return
-        
-    # Check if message is a reply
-    if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "📢 <b>Usage Instructions:</b>\n\n"
-            "1. Reply to any message with /broadcast\n"
-            "2. Confirm with /confirm_broadcast\n\n"
-            "Supports: text, photos, videos, documents, stickers, audio",
-            parse_mode='HTML'
-        )
-        return
-        
-    # Get the replied message
-    replied_msg = update.message.reply_to_message
-        
-    db = get_db()
-    if db is None:
-        await update.message.reply_text("⚠️ Database connection error. Broadcast unavailable.")
-        return
-        
-    try:
-        users = db.users
-        user_ids = [user["user_id"] for user in users.find({}, {"user_id": 1})]
-        total_users = len(user_ids)
-        
-        if not user_ids:
-            await update.message.reply_text("⚠️ No users found in database.")
-            return
-            
-        # Create preview message with HTML formatting
-        preview_html = "📢 <b>Broadcast Preview</b>\n\n"
-        preview_html += f"• Recipients: {total_users} users\n\n"
-        
-        if replied_msg.text:
-            # Escape and truncate text
-            safe_content = html.escape(replied_msg.text)
-            display_text = safe_content[:300] + ("..." if len(safe_content) > 300 else "")
-            preview_html += f"Content:\n<pre>{display_text}</pre>"
-        elif replied_msg.caption:
-            # Escape and truncate caption
-            safe_caption = html.escape(replied_msg.caption)
-            caption_snippet = safe_caption[:100] + ("..." if len(safe_caption) > 100 else "")
-            preview_html += f"Caption:\n<pre>{caption_snippet}</pre>"
-        else:
-            media_type = "media"
-            if replied_msg.photo: media_type = "photo"
-            elif replied_msg.video: media_type = "video"
-            elif replied_msg.document: media_type = "document"
-            elif replied_msg.sticker: media_type = "sticker"
-            elif replied_msg.audio: media_type = "audio"
-            elif replied_msg.voice: media_type = "voice"
-            preview_html += f"✅ Ready to send {html.escape(media_type)} message"
-            
-        preview_html += "\n\nType /confirm_broadcast to send or /cancel to abort."
-        
-        # Send preview with HTML parsing
-        preview_msg = await update.message.reply_text(
-            preview_html,
-            parse_mode='HTML'
-        )
-        
-        # Store broadcast data in context
-        context.user_data["broadcast_data"] = {
-            "message": replied_msg,
-            "user_ids": user_ids,
-            "preview_msg_id": preview_msg.message_id
+    await update.message.reply_text(confirmation_text)
+    return QUIZ_CONFIRM
+
+async def quiz_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    response = update.message.text.lower()
+    if response == "yes":
+        # Generate unique quiz ID
+        quiz_id = "qz_" + str(int(datetime.now().timestamp()))[-8:]
+        quizzes[quiz_id] = {
+            "question": context.user_data["quiz"]["question"],
+            "options": context.user_data["quiz"]["options"],
+            "correct": context.user_data["quiz"]["correct"],
+            "creator": update.effective_user.id
         }
+        save_data(quizzes, QUIZZES_FILE)
         
-    except Exception as e:
-        logger.error(f"Broadcast preparation error: {e}")
-        await update.message.reply_text("⚠️ Error preparing broadcast. Please try again later.")
-
-async def send_broadcast_message(context, user_id, message):
-    """Send broadcast message to a specific user with error handling"""
-    try:
-        # Copy message to user
-        await message.copy(chat_id=user_id)
-        return True, None
-    except RetryAfter as e:
-        # Wait for the specified time plus a small buffer
-        wait_time = e.retry_after + 0.5
-        logger.warning(f"Rate limited for {user_id}: Waiting {wait_time} seconds")
-        await asyncio.sleep(wait_time)
-        # Retry after waiting
-        return await send_broadcast_message(context, user_id, message)
-    except (BadRequest, Exception) as e:
-        error_type = type(e).__name__
-        error_details = str(e)
-        logger.warning(f"Failed to send to {user_id}: {error_type} - {error_details}")
-        return False, f"{user_id}: {error_type} - {error_details}"
-
-async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        return
+        # Deduct token for non-sudo users
+        user_id = update.effective_user.id
+        if user_id not in SUDO_USERS:
+            use_token(user_id)
         
-    broadcast_data = context.user_data.get("broadcast_data")
-    if not broadcast_data:
-        await update.message.reply_text("⚠️ No pending broadcast. Start with /broadcast.")
-        return
+        # Update user stats
+        add_quiz_created(user_id)
         
-    try:
-        user_ids = broadcast_data["user_ids"]
-        message_to_broadcast = broadcast_data["message"]
-        total_users = len(user_ids)
-        
-        status_msg = await update.message.reply_text(
-            f"📤 Broadcasting to {total_users} users...\n\n"
-            f"0/{total_users} (0%)\n"
-            f"✅ Success: 0 | ❌ Failed: 0"
+        await update.message.reply_text(
+            f"🎉 Quiz created successfully!\n\n"
+            f"Share this ID for others to take it: <code>{quiz_id}</code>\n\n"
+            f"You have {tokens.get(str(user_id), 0)} tokens remaining.",
+            parse_mode="HTML"
         )
-        
-        success = 0
-        failed = 0
-        failed_details = []
-        
-        # Send messages with rate limiting
-        for i, user_id in enumerate(user_ids):
-            result, error = await send_broadcast_message(context, user_id, message_to_broadcast)
-            
-            if result:
-                success += 1
-            else:
-                failed += 1
-                if error and len(failed_details) < 20:
-                    failed_details.append(error)
-            
-            # Update progress every 20 users or last user
-            if (i + 1) % 20 == 0 or (i + 1) == total_users:
-                percent = (i + 1) * 100 // total_users
-                await status_msg.edit_text(
-                    f"📤 Broadcasting to {total_users} users...\n\n"
-                    f"{i+1}/{total_users} ({percent}%)\n"
-                    f"✅ Success: {success} | ❌ Failed: {failed}"
-                )
-                # Conservative rate limiting
-                await asyncio.sleep(0.1)
-        
-        # Prepare final report
-        report_text = (
-            f"✅ Broadcast Complete!\n\n"
-            f"• Recipients: {total_users}\n"
-            f"• Success: {success}\n"
-            f"• Failed: {failed}"
-        )
-        
-        # Add error details if any failures
-        if failed > 0:
-            report_text += f"\n\n📛 Failed Users (Sample):\n"
-            report_text += "\n".join(failed_details[:5])
-            if failed > 5:
-                report_text += f"\n\n...and {failed - 5} more failures"
-        
-        # Update final status
-        await status_msg.edit_text(report_text)
-        
-        # Cleanup
-        del context.user_data["broadcast_data"]
-        
-    except Exception as e:
-        logger.error(f"Broadcast error: {e}")
-        await update.message.reply_text(f"⚠️ Critical broadcast error: {str(e)}")
-
-async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        return
-        
-    if "broadcast_data" in context.user_data:
-        del context.user_data["broadcast_data"]
-        await update.message.reply_text("✅ Broadcast canceled.")
     else:
-        await update.message.reply_text("ℹ️ No pending broadcast to cancel.")
+        await update.message.reply_text("Quiz creation canceled.")
+    
+    context.user_data.clear()
+    return ConversationHandler.END
 
-def main() -> None:
-    """Run the bot and HTTP server"""
-    # Create TTL index for token expiration
-    create_ttl_index()
-    
-    # Get port from environment (Render provides this)
-    PORT = int(os.environ.get('PORT', 10000))
-    logger.info(f"Starting HTTP server on port {PORT}")
-    
-    # Start HTTP server in a daemon thread
-    http_thread = threading.Thread(target=run_http_server, args=(PORT,), daemon=True)
-    http_thread.start()
-    logger.info(f"HTTP server thread started")
-    
-    # Get token from environment
-    TOKEN = os.getenv('TELEGRAM_TOKEN')
-    if not TOKEN:
-        logger.error("No TELEGRAM_TOKEN found in environment!")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Operation canceled.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def take_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not quizzes:
+        await update.message.reply_text("No quizzes available yet. Create one with /create!")
         return
     
-    # Create Telegram application
+    quiz_id, quiz = random.choice(list(quizzes.items()))
+    
+    options = quiz["options"]
+    keyboard = []
+    for i, option in enumerate(options):
+        keyboard.append([InlineKeyboardButton(option, callback_data=f"quiz_{quiz_id}_{i}")])
+    
+    context.user_data["current_quiz"] = quiz_id
+    context.user_data["correct_index"] = quiz["correct"]
+    
+    await update.message.reply_text(
+        f"❓ Quiz: {quiz['question']}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    _, quiz_id, selected_index = query.data.split("_")
+    selected_index = int(selected_index)
+    correct_index = context.user_data["correct_index"]
+    
+    quiz = quizzes.get(quiz_id)
+    if not quiz:
+        await query.edit_message_text("Quiz no longer exists.")
+        return
+    
+    user_id = query.from_user.id
+    add_user(user_id)
+    
+    if selected_index == correct_index:
+        add_points(user_id, 10)
+        add_quiz_taken(user_id)
+        result = "✅ Correct! +10 points!"
+    else:
+        correct_answer = quiz["options"][correct_index]
+        result = f"❌ Incorrect! The correct answer was: {correct_answer}"
+    
+    await query.edit_message_text(
+        f"{result}\n\n"
+        f"Question: {quiz['question']}\n"
+        f"Your answer: {quiz['options'][selected_index]}\n"
+        f"Correct answer: {quiz['options'][correct_index]}"
+    )
+    
+    context.user_data.clear()
+
+async def tokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_tokens = tokens.get(str(user_id), 0)
+    
+    status = "🌟 Sudo User (Unlimited)" if user_id in SUDO_USERS else f"Tokens: {user_tokens}"
+    
+    await update.message.reply_text(
+        f"🔑 Your Token Status:\n\n"
+        f"{status}\n\n"
+        f"Get more tokens with /get_token"
+    )
+
+async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    
+    # Sudo users don't need tokens
+    if update.effective_user.id in SUDO_USERS:
+        await update.message.reply_text("🌟 You're a sudo user! You don't need tokens to create quizzes.")
+        return
+    
+    # Check if user has enough points
+    user_points = users.get(user_id, {}).get("points", 0)
+    if user_points < TOKEN_PRICE:
+        await update.message.reply_text(
+            f"❌ You need {TOKEN_PRICE} points to get a token!\n"
+            f"You currently have {user_points} points.\n\n"
+            "Take more quizzes to earn points!"
+        )
+        return
+    
+    # Deduct points and add token
+    users[user_id]["points"] -= TOKEN_PRICE
+    tokens[user_id] = tokens.get(user_id, 0) + 1
+    save_data({"tokens": tokens, "last_request": last_token_request}, TOKENS_FILE)
+    save_data(users, USERS_FILE)
+    
+    await update.message.reply_text(
+        f"🎉 Token purchased successfully!\n\n"
+        f"• {TOKEN_PRICE} points deducted\n"
+        f"• New token balance: {tokens[user_id]}\n"
+        f"• Current points: {users[user_id]['points']}"
+    )
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total_users = len(users)
+    total_quizzes = len(quizzes)
+    total_tokens = sum(tokens.values())
+    sudo_count = len(SUDO_USERS)
+    
+    stats_text = (
+        f"📊 Bot Statistics:\n\n"
+        f"• Total Users: {total_users}\n"
+        f"• Total Quizzes: {total_quizzes}\n"
+        f"• Sudo Users: {sudo_count}\n"
+        f"• Available Tokens: {total_tokens}"
+    )
+    
+    await update.message.reply_text(stats_text)
+
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not users:
+        await update.message.reply_text("No users yet!")
+        return
+    
+    top_users = sorted(
+        [(uid, data["points"]) for uid, data in users.items()],
+        key=lambda x: x[1],
+        reverse=True
+    )[:10]
+    
+    leaderboard_text = "🏆 Top Users:\n\n"
+    for i, (user_id, points) in enumerate(top_users):
+        try:
+            user = await context.bot.get_chat(int(user_id))
+            name = user.username or user.first_name
+        except:
+            name = f"User {user_id}"
+        
+        leaderboard_text += f"{i+1}. {name}: {points} points\n"
+    
+    await update.message.reply_text(leaderboard_text)
+
+# Admin commands
+async def add_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /add_tokens <user_id> <amount>")
+        return
+    
+    try:
+        user_id = str(context.args[0])
+        amount = int(context.args[1])
+        
+        tokens[user_id] = tokens.get(user_id, 0) + amount
+        save_data({"tokens": tokens, "last_request": last_token_request}, TOKENS_FILE)
+        
+        await update.message.reply_text(
+            f"✅ Added {amount} tokens to user {user_id}!\n"
+            f"New balance: {tokens[user_id]}"
+        )
+    except ValueError:
+        await update.message.reply_text("Invalid input. Usage: /add_tokens <user_id> <amount>")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can use this command!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+    
+    message = " ".join(context.args)
+    success = 0
+    failed = 0
+    
+    for user_id in users:
+        try:
+            await context.bot.send_message(chat_id=int(user_id), text=f"📢 Broadcast:\n\n{message}")
+            success += 1
+        except:
+            failed += 1
+    
+    await update.message.reply_text(
+        f"Broadcast completed:\n"
+        f"• Sent to: {success} users\n"
+        f"• Failed: {failed} users"
+    )
+
+def main():
     application = Application.builder().token(TOKEN).build()
     
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_wrapper))
-    application.add_handler(CommandHandler("help", help_command_wrapper))
-    application.add_handler(CommandHandler("createquiz", create_quiz_wrapper))
-    application.add_handler(CommandHandler("stats", stats_command_wrapper))
-    application.add_handler(CommandHandler("broadcast", broadcast_command_wrapper))
-    application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
-    application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
-    application.add_handler(CommandHandler("token", token_command))
-    application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
+    # Conversation handler for quiz creation
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("create", create_quiz)],
+        states={
+            QUIZ_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_question)],
+            QUIZ_OPTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_options)],
+            QUIZ_CORRECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_correct)],
+            QUIZ_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, quiz_confirm)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
     
-    # Start polling
-    logger.info("Starting Telegram bot in polling mode...")
-    try:
-        application.run_polling()
-    except Exception as e:
-        logger.critical(f"Telegram bot failed: {e}")
-        # Attempt to restart after delay
-        time.sleep(10)
-        main()
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("quiz", take_quiz))
+    application.add_handler(CommandHandler("tokens", tokens_command))
+    application.add_handler(CommandHandler("get_token", get_token))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("leaderboard", leaderboard))
+    application.add_handler(CommandHandler("add_tokens", add_tokens))
+    application.add_handler(CommandHandler("broadcast", broadcast))
+    application.add_handler(CallbackQueryHandler(quiz_answer, pattern=r"^quiz_"))
+    
+    # Start the bot
+    application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
