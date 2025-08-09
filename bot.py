@@ -10,7 +10,6 @@ import secrets
 import string
 import random
 import aiohttp
-from threading import Thread
 from flask import Flask
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -42,19 +41,18 @@ AD_API = os.getenv('AD_API', '446b3a3f0039a2826f1483f22e9080963974ad3b')
 WEBSITE_URL = os.getenv('WEBSITE_URL', 'upshrink.com')
 YOUTUBE_TUTORIAL = "https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht"  # Added tutorial link
 
-
 # Flask app for health checks
 app = Flask(__name__)
 
 @app.route('/')
+@app.route('/health')
+@app.route('/status')
 def health_check():
     return "Bot is running", 200
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8000)
-
-# Global variables for bot stats
-BOT_START_TIME = time.time()
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
 
 # MongoDB connection function
 def get_db():
@@ -840,13 +838,22 @@ async def has_valid_token(user_id):
     return token_data is not None  # TTL index handles expiration
 
 def main() -> None:
+    """Run the bot and HTTP server"""
+    # Create database indexes
+    create_ttl_index()
+    create_sudo_index()
+    
+    # Start Flask server in a daemon thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"Flask server started in separate thread")
     
     # Get token from environment
     TOKEN = os.getenv('TELEGRAM_TOKEN')
     if not TOKEN:
         logger.error("No TELEGRAM_TOKEN found in environment!")
         return
-    Thread(target=run_flask, daemon=True).start()
+    
     # Create Telegram application
     application = Application.builder().token(TOKEN).build()
     
