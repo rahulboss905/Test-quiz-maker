@@ -10,6 +10,7 @@ import secrets
 import string
 import random
 import aiohttp
+from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -133,26 +134,18 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         """Override to prevent default logging"""
         pass
 
-def run_http_server(port=8080):
-    """Run HTTP server in a separate thread"""
-    try:
-        server_address = ('0.0.0.0', port)
-        httpd = HTTPServer(server_address, HealthCheckHandler)
-        
-        # Add start time to server instance
-        httpd.start_time = time.time()
-        
-        logger.info(f"HTTP server running on port {port}")
-        logger.info(f"Access URLs:")
-        logger.info(f"  http://localhost:{port}/")
-        logger.info(f"  http://localhost:{port}/health")
-        logger.info(f"  http://localhost:{port}/status")
-        
-        httpd.serve_forever()
-    except Exception as e:
-        logger.critical(f"Failed to start HTTP server: {e}")
-        time.sleep(5)
-        run_http_server(port)
+# Flask app for health checks
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot is running", 200
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8000)
+
+# Global variables for bot stats
+BOT_START_TIME = time.time()
 
 # MongoDB connection function
 def get_db():
@@ -957,7 +950,7 @@ def main() -> None:
     if not TOKEN:
         logger.error("No TELEGRAM_TOKEN found in environment!")
         return
-    
+    Thread(target=run_flask, daemon=True).start()
     # Create Telegram application
     application = Application.builder().token(TOKEN).build()
     
