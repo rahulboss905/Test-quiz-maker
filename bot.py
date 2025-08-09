@@ -2,7 +2,6 @@ import os
 import logging
 import threading
 import time
-import socket
 import traceback
 import asyncio
 import html
@@ -12,7 +11,6 @@ import random
 import aiohttp
 import re
 from flask import Flask
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -65,7 +63,8 @@ def get_db():
             return None
             
         client = MongoClient(mongo_uri)
-        client.admin.command('ping')  # Test connection
+        # Use a more reliable connection test
+        client.server_info()  # This will force a connection attempt
         logger.info("MongoDB connection successful")
         return client.telegram_bot
     except Exception as e:
@@ -222,7 +221,7 @@ async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         
         # Save to database
         db = get_db()
-        if db:
+        if db is not None:  # Explicit None check
             cloned_bots = db.cloned_bots
             cloned_bots.insert_one({
                 "user_id": update.effective_user.id,
@@ -230,6 +229,8 @@ async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "bot_username": bot_username,
                 "created_at": datetime.utcnow()
             })
+        else:
+            logger.error("Database connection failed during clone operation")
         
         # Create response
         response = (
