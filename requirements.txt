@@ -3,3 +3,4 @@ pymongo[srv]==4.3.3
 python-dotenv==1.0.0
 requests==2.31.0
 aiohttp==3.9.3
+flask
