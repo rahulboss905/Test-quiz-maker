@@ -17,7 +17,8 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    ApplicationBuilder
 )
 from telegram.error import RetryAfter, BadRequest
 from pymongo import MongoClient
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "7.4"  # Added clone feature
+BOT_VERSION = "7.5"  # Fixed clone feature
 temp_params = {}  # Temporary storage for verification params
 
 # API Configuration
@@ -215,7 +216,9 @@ async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Verify the token
     try:
         # Create a temporary application to verify the token
-        temp_app = Application.builder().token(bot_token).build()
+        temp_app = ApplicationBuilder().token(bot_token).build()
+        await temp_app.initialize()
+        await temp_app.start()
         bot_info = await temp_app.bot.get_me()
         bot_username = bot_info.username
         
@@ -258,13 +261,38 @@ async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_markup=reply_markup
         )
         
+        # Initialize and start the cloned bot in a new thread
+        threading.Thread(target=run_cloned_bot, args=(bot_token,), daemon=True).start()
+        
     except Exception as e:
-        logger.error(f"Token verification failed: {e}")
+        logger.error(f"Token verification failed: {e}", exc_info=True)
         await update.message.reply_text(
             f"❌ Failed to verify bot token: {str(e)}\n\n"
             "Please check that the token is correct and try again.",
             parse_mode='Markdown'
         )
+
+# Function to run a cloned bot
+def run_cloned_bot(token: str):
+    """Run a cloned bot in a separate thread"""
+    try:
+        logger.info(f"Starting cloned bot with token: {token[:10]}...")
+        
+        # Create application for the cloned bot
+        application = ApplicationBuilder().token(token).build()
+        
+        # Add handlers for the cloned bot
+        application.add_handler(CommandHandler("start", start_wrapper))
+        application.add_handler(CommandHandler("help", help_command_wrapper))
+        application.add_handler(CommandHandler("createquiz", create_quiz_wrapper))
+        application.add_handler(CommandHandler("token", token_command))
+        application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
+        
+        # Start polling
+        application.run_polling()
+        logger.info(f"Cloned bot with token {token[:10]}... is now running")
+    except Exception as e:
+        logger.error(f"Failed to start cloned bot: {e}", exc_info=True)
 
 # Token command
 async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -981,6 +1009,13 @@ def main() -> None:
     # Add sudo management commands
     application.add_handler(CommandHandler("addsudo", add_sudo))
     application.add_handler(CommandHandler("remsudo", rem_sudo))
+    
+    # Start any existing cloned bots
+    db = get_db()
+    if db is not None:
+        cloned_bots = db.cloned_bots.find({})
+        for bot in cloned_bots:
+            threading.Thread(target=run_cloned_bot, args=(bot['token'],), daemon=True).start()
     
     # Start polling
     logger.info("Starting Telegram bot in polling mode...")
