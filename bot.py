@@ -113,6 +113,7 @@ async def create_clone_index():
 # Optimized user interaction recording
 async def record_user_interaction(update: Update):
     try:
+        # Check if DB is initialized (not None)
         if DB is None:
             return
             
@@ -172,6 +173,7 @@ async def is_sudo(user_id):
         result = True
     else:
         result = False
+        # Check if DB is initialized (not None)
         if DB is not None:
             try:
                 result = await DB.sudo_users.find_one({"user_id": user_id}) is not None
@@ -229,7 +231,7 @@ async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         bot_info = await temp_app.bot.get_me()
         bot_username = bot_info.username
         
-        # Save to database
+        # Save to database - check if DB is initialized (not None)
         if DB is not None:
             await DB.cloned_bots.insert_one({
                 "user_id": update.effective_user.id,
@@ -390,7 +392,7 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         
         # Check if it's a verification token
         if user_id in temp_params and temp_params[user_id] == token:
-            # Store token in database
+            # Store token in database - check if DB is initialized (not None)
             if DB is not None:
                 await DB.tokens.update_one(
                     {"user_id": user_id},
@@ -646,6 +648,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("🚫 This command is only available to the bot owner.")
         return
 
+    # Check if DB is initialized (not None)
     if DB is None:
         await update.message.reply_text("⚠️ Database connection error. Stats unavailable.")
         return
@@ -712,6 +715,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Get the replied message
     replied_msg = update.message.reply_to_message
         
+    # Check if DB is initialized (not None)
     if DB is None:
         await update.message.reply_text("⚠️ Database connection error. Broadcast unavailable.")
         return
@@ -908,7 +912,7 @@ async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
         
-    # Add to sudo list
+    # Add to sudo list - check if DB is initialized (not None)
     if DB is None:
         await update.message.reply_text("⚠️ Database connection error")
         return
@@ -958,7 +962,7 @@ async def rem_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
         
-    # Remove from sudo list
+    # Remove from sudo list - check if DB is initialized (not None)
     if DB is None:
         await update.message.reply_text("⚠️ Database connection error")
         return
@@ -988,6 +992,7 @@ async def has_valid_token(user_id):
         return cached['result']
         
     result = False
+    # Check if DB is initialized (not None)
     if DB is not None:
         try:
             token_data = await DB.tokens.find_one({"user_id": user_id})
@@ -1008,14 +1013,16 @@ async def main_async() -> None:
     
     # Initialize database
     DB = await init_db()
-    if DB:
+    
+    # Only proceed if DB initialization was successful (DB is not None)
+    if DB is not None:
         await asyncio.gather(
             create_ttl_index(),
             create_sudo_index(),
             create_clone_index()
         )
     
-    # Start any existing cloned bots
+    # Start any existing cloned bots if DB is available
     if DB is not None:
         cloned_bots = []
         async for bot in DB.cloned_bots.find({}):
