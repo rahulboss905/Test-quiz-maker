@@ -422,37 +422,36 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
-
 async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     
     # Create premium plans message
     plans_message = (
-        "💠 UPGRADE TO PREMIUM 💠\n\n"
-        "🚀 Premium Features:\n"
-        "🧠 UNLIMITED QUIZ CREATION\n\n"
+        "💠 *UPGRADE TO PREMIUM* 💠\n\n"
+        "🚀 *Premium Features:*\n"
+        "🧠 *UNLIMITED QUIZ CREATION*\n\n"
         
-        "🔓 FREE PLAN (with restrictions)\n"
-        "🕰️ Expiry: Never\n"
-        "💰 Price: ₹0\n\n"
+        "🔓 *FREE PLAN* (with restrictions)\n"
+        "🕰️ *Expiry:* Never\n"
+        "💰 *Price:* ₹0\n\n"
         
-        "🕐 1-DAY PLAN\n"
-        "💰 Price: ₹10 🇮🇳\n"
-        "📅 Duration: 1 Day\n\n"
+        "🕐 *1-DAY PLAN*\n"
+        "💰 *Price:* ₹10 🇮🇳\n"
+        "📅 *Duration:* 1 Day\n\n"
         
-        "📆 1-WEEK PLAN\n"
-        "💰 Price: ₹25 🇮🇳\n"
-        "📅 Duration: 10 Days\n\n"
+        "📆 *1-WEEK PLAN*\n"
+        "💰 *Price:* ₹25 🇮🇳\n"
+        "📅 *Duration:* 10 Days\n\n"
         
-        "🗓️ MONTHLY PLAN\n"
-        "💰 Price: ₹50 🇮🇳\n"
-        "📅 Duration: 1 Month\n\n"
+        "🗓️ *MONTHLY PLAN*\n"
+        "💰 *Price:* ₹50 🇮🇳\n"
+        "📅 *Duration:* 1 Month\n\n"
         
-        "🪙 2-MONTH PLAN\n"
-        "💰 Price: ₹100 🇮🇳\n"
-        "📅 Duration: 2 Months\n\n"
+        "🪙 *2-MONTH PLAN*\n"
+        "💰 *Price:* ₹100 🇮🇳\n"
+        "📅 *Duration:* 2 Months\n\n"
         
-        f"📞 Contact Now to Upgrade\n👉 {PREMIUM_CONTACT}"
+        f"📞 *Contact Now to Upgrade*\n👉 {PREMIUM_CONTACT}"
     )
     
     keyboard = [
@@ -466,6 +465,7 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
+
     
 async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
