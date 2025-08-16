@@ -18,7 +18,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    ApplicationBuilder
+    ApplicationBuilder,
+    CallbackQueryHandler  # Added missing import
 )
 from telegram.error import RetryAfter, BadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -343,15 +344,6 @@ async def create_quiz_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def stats_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await check_access(update, context, stats_command)
 
-async def broadcast_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_access(update, context, broadcast_command)
-
-async def confirm_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_access(update, context, confirm_broadcast)
-
-async def cancel_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_access(update, context, cancel_broadcast)
-
 async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await check_access(update, context, handle_document)
 
@@ -440,7 +432,7 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🚀 𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:\n"
         "🧠 𝗨𝗡𝗟𝗜𝗠𝗜𝗧𝗘𝗗 𝗤𝗨𝗜𝗭 𝗖𝗥𝗘𝗔𝗧𝗜𝗢𝗡\n\n"
         
-        "🔓 𝙁𝙍𝙀𝙀 𝙋𝙇𝘼𝙉 (𝘸𝘪𝘵𝘩 𝘳𝘦𝘴𝘵𝘳𝘪𝘤𝘵𝘪𝘰𝘯𝘴)\n"
+        "🔓 �𝙍𝙀𝙀 𝙋𝙇𝘼𝙉 (𝘸𝘪𝘵𝘩 𝘳𝘦𝘴𝘵𝘳𝘪𝘤𝘵𝘪𝘰𝘯𝘴)\n"
         "🕰️ 𝗘𝘅𝗽𝗶𝗿𝘆: Never\n"
         "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟬\n\n"
         
@@ -456,7 +448,7 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟱𝟬 🇮🇳\n"
         "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 1 Month\n\n"
         
-        "🪙 𝟮-𝗠𝗢𝗡𝗧𝗛 𝗣𝗟𝗔𝗡\n"
+        "🪙 𝟮-𝗠𝗢𝗡𝗧𝗛𝗬 𝗣𝗟𝗔𝗡\n"
         "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟭𝟬𝟬 🇮🇳\n"
         "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 2 Months\n\n"
         
@@ -1073,9 +1065,6 @@ async def main_async() -> None:
     application.add_handler(CommandHandler("help", help_command_wrapper))
     application.add_handler(CommandHandler("createquiz", create_quiz_wrapper))
     application.add_handler(CommandHandler("stats", stats_command_wrapper))
-    application.add_handler(CommandHandler("broadcast", broadcast_command_wrapper))
-    application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
-    application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
     application.add_handler(CommandHandler("token", token_command))
     application.add_handler(CommandHandler("plan", plan_command))
     application.add_handler(CommandHandler("myplan", my_plan_command))
