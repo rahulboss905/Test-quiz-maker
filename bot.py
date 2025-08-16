@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "8.1"  # Premium features version
+BOT_VERSION = "8.2"  # Premium plans version
 temp_params = {}
 DB = None  # Global async database instance
 MONGO_CLIENT = None  # Global MongoDB client
@@ -45,6 +45,7 @@ AD_API = os.getenv('AD_API', '446b3a3f0039a2826f1483f22e9080963974ad3b')
 WEBSITE_URL = os.getenv('WEBSITE_URL', 'upshrink.com')
 YOUTUBE_TUTORIAL = "https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht"
 GITHUB_REPO = "https://github.com/yourusername/your-repo"
+PREMIUM_CONTACT = "@Mr_rahul090"  # Premium contact
 
 # Caches for performance
 SUDO_CACHE = {}
@@ -64,6 +65,37 @@ def health_check():
 def run_flask():
     port = int(os.environ.get('PORT', 8000))
     app.run(host='0.0.0.0', port=port, threaded=True)
+
+# Convert UTC to IST (UTC+5:30)
+def to_ist(utc_time):
+    return utc_time + timedelta(hours=5, minutes=30)
+
+# Format time in IST
+def format_ist(utc_time):
+    ist_time = to_ist(utc_time)
+    return ist_time.strftime("%Y-%m-%d %H:%M:%S")
+
+# Format time left
+def format_time_left(expiry):
+    now = datetime.utcnow()
+    if expiry < now:
+        return "Expired"
+    
+    delta = expiry - now
+    days = delta.days
+    seconds = delta.seconds
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} days")
+    if hours > 0:
+        parts.append(f"{hours} hours")
+    if minutes > 0:
+        parts.append(f"{minutes} minutes")
+    
+    return ", ".join(parts) if parts else "Less than 1 minute"
 
 # Async MongoDB connection
 async def init_db():
@@ -344,17 +376,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     welcome_msg += "Let's make learning fun!"
     
-    # Create keyboard with tutorial button
-    keyboard = [[
-        InlineKeyboardButton(
-            "🎥 Watch Tutorial",
-            url=YOUTUBE_TUTORIAL
-        ),
-        InlineKeyboardButton(
-            "💎 Get Premium",
-            url="https://t.me/your_premium_channel"
-        )
-    ]]
+    # Create keyboard with tutorial and premium buttons
+    keyboard = [
+        [
+            InlineKeyboardButton("🎥 Watch Tutorial", url=YOUTUBE_TUTORIAL),
+            InlineKeyboardButton("💎 Premium Plans", callback_data="premium_plans")
+        ]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
@@ -365,16 +393,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
-    keyboard = [[
-        InlineKeyboardButton(
-            "🎥 Watch Tutorial",
-            url=YOUTUBE_TUTORIAL
-        ),
-        InlineKeyboardButton(
-            "💎 Get Premium",
-            url="https://t.me/your_premium_channel"
-        )
-    ]]
+    keyboard = [
+        [
+            InlineKeyboardButton("🎥 Watch Tutorial", url=YOUTUBE_TUTORIAL),
+            InlineKeyboardButton("💎 Premium Plans", callback_data="premium_plans")
+        ]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
@@ -403,6 +427,50 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Unlimited quiz creation\n"
         "- No token required\n"
         "- Priority support",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await record_user_interaction(update)
+    
+    # Create premium plans message
+    plans_message = (
+        "💠 𝗨𝗣𝗚𝗥𝗔𝗗𝗘 𝗧𝗢 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 💠\n\n"
+        "🚀 𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:\n"
+        "🧠 𝗨𝗡𝗟𝗜𝗠𝗜𝗧𝗘𝗗 𝗤𝗨𝗜𝗭 𝗖𝗥𝗘𝗔𝗧𝗜𝗢𝗡\n\n"
+        
+        "🔓 𝙁𝙍𝙀𝙀 𝙋𝙇𝘼𝙉 (𝘸𝘪𝘵𝘩 𝘳𝘦𝘴𝘵𝘳𝘪𝘤𝘵𝘪𝘰𝘯𝘴)\n"
+        "🕰️ 𝗘𝘅𝗽𝗶𝗿𝘆: Never\n"
+        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟬\n\n"
+        
+        "🕐 𝟭-𝗗𝗔𝗬 𝗣𝗟𝗔𝗡\n"
+        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟭𝟬 🇮🇳\n"
+        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 1 Day\n\n"
+        
+        "📆 𝟭-𝗪𝗘𝗘𝗞 𝗣𝗟𝗔𝗡\n"
+        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟮𝟱 🇮🇳\n"
+        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 10 Days\n\n"
+        
+        "🗓️ 𝗠𝗢𝗡𝗧𝗛𝗟𝗬 𝗣𝗟𝗔𝗡\n"
+        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟱𝟬 🇮🇳\n"
+        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 1 Month\n\n"
+        
+        "🪙 𝟮-𝗠𝗢𝗡𝗧𝗛 𝗣𝗟𝗔𝗡\n"
+        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟭𝟬𝟬 🇮🇳\n"
+        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 2 Months\n\n"
+        
+        f"📞 𝗖𝗼𝗻𝘁𝗮𝗰𝘁 𝗡𝗼𝘄 𝘁𝗼 𝗨𝗽𝗴𝗿𝗮𝗱𝗲\n👉 {PREMIUM_CONTACT}"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("💎 Get Premium", url=f"https://t.me/{PREMIUM_CONTACT.lstrip('@')}")],
+        [InlineKeyboardButton("📋 My Plan", callback_data="my_plan")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        plans_message,
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -620,7 +688,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"• Current Ping: `{ping_time:.2f} ms`\n"
             f"• Uptime: `{uptime}`\n"
             f"• Version: `{BOT_VERSION}`\n\n"
-            f"_Updated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}_"
+            f"_Updated at {format_ist(datetime.utcnow())} IST_"
         )
         
         # Edit the ping message with full stats
@@ -706,6 +774,10 @@ async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     now = datetime.utcnow()
     expiry_date = now + duration
     
+    # Format dates for IST display
+    join_date_ist = format_ist(now)
+    expiry_date_ist = format_ist(expiry_date)
+    
     # Add to premium collection
     if DB is not None:
         await DB.premium_users.update_one(
@@ -724,12 +796,6 @@ async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if target_user_id in PREMIUM_CACHE:
             del PREMIUM_CACHE[target_user_id]
         
-        # Format dates for display
-        join_date = now.strftime("%Y-%m-%d")
-        join_time = now.strftime("%H:%M:%S")
-        expiry_date_str = expiry_date.strftime("%Y-%m-%d")
-        expiry_time = expiry_date.strftime("%H:%M:%S")
-        
         # Send message to premium user
         try:
             await context.bot.send_message(
@@ -739,10 +805,8 @@ async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     "ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴘᴜʀᴄʜᴀꜱɪɴɢ ᴘʀᴇᴍɪᴜᴍ.\n"
                     "ᴇɴᴊᴏʏ !! ✨🎉\n\n"
                     f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ : {duration_str}\n"
-                    f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {join_date}\n"
-                    f"⏱️ ᴊᴏɪɴɪɴɢ ᴛɪᴍᴇ : {join_time}\n\n"
-                    f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date_str}\n"
-                    f"⏱️ ᴇxᴘɪʀʏ ᴛɪᴍᴇ : {expiry_time}"
+                    f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {join_date_ist} IST\n"
+                    f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date_ist} IST"
                 )
             )
         except Exception as e:
@@ -754,10 +818,8 @@ async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"👤 ᴜꜱᴇʀ : {target_fullname}\n"
             f"⚡ ᴜꜱᴇʀ ɪᴅ : `{target_user_id}`\n"
             f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ : {duration_str}\n\n"
-            f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {join_date}\n"
-            f"⏱️ ᴊᴏɪɴɪɴɢ ᴛɪᴍᴇ : {join_time}\n\n"
-            f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date_str}\n"
-            f"⏱️ ᴇxᴘɪʀʏ ᴛɪᴍᴇ : {expiry_time}",
+            f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {join_date_ist} IST\n"
+            f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date_ist} IST",
             parse_mode='Markdown'
         )
     else:
@@ -842,15 +904,15 @@ async def list_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             user_id = user["user_id"]
             full_name = user.get("full_name", "Unknown")
             plan = user.get("plan", "Unknown")
-            start_date = user["start_date"].strftime("%Y-%m-%d %H:%M")
-            expiry_date = user["expiry_date"].strftime("%Y-%m-%d %H:%M")
+            start_date = format_ist(user["start_date"])
+            expiry_date = format_ist(user["expiry_date"])
             
             response += (
                 f"👤 *User*: {full_name}\n"
                 f"🆔 *ID*: `{user_id}`\n"
                 f"📦 *Plan*: {plan}\n"
-                f"⏱️ *Start*: {start_date}\n"
-                f"⏳ *Expiry*: {expiry_date}\n"
+                f"⏱️ *Start*: {start_date} IST\n"
+                f"⏳ *Expiry*: {expiry_date} IST\n"
                 f"────────────────────\n"
             )
         
@@ -862,6 +924,70 @@ async def list_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         logger.error(f"Premium list error: {e}")
         await update.message.reply_text("⚠️ Error retrieving premium users.")
+
+async def my_plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await record_user_interaction(update)
+    user = update.effective_user
+    user_id = user.id
+    
+    # Check if user is premium
+    if not await is_premium(user_id):
+        # Suggest premium plans
+        keyboard = [
+            [InlineKeyboardButton("💎 Premium Plans", callback_data="premium_plans")],
+            [InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{PREMIUM_CONTACT.lstrip('@')}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🔒 You don't have an active premium plan.\n\n"
+            "Upgrade to premium for unlimited quiz creation and other benefits!",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Get premium details
+    if DB is not None:
+        premium_data = await DB.premium_users.find_one({"user_id": user_id})
+        if premium_data:
+            # Format dates in IST
+            start_date = format_ist(premium_data["start_date"])
+            expiry_date = format_ist(premium_data["expiry_date"])
+            time_left = format_time_left(premium_data["expiry_date"])
+            plan_name = premium_data.get("plan", "Premium")
+            
+            response = (
+                "⚜️ ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀ ᴅᴀᴛᴀ :\n\n"
+                f"👤 ᴜꜱᴇʀ : {premium_data.get('full_name', user.full_name)}\n"
+                f"⚡ ᴜꜱᴇʀ ɪᴅ : `{user_id}`\n"
+                f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴘʟᴀɴ : {plan_name}\n\n"
+                f"⏱️ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {start_date} IST\n"
+                f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date} IST\n"
+                f"⏳ ᴛɪᴍᴇ ʟᴇꜰᴛ : {time_left}"
+            )
+            
+            await update.message.reply_text(
+                response,
+                parse_mode='Markdown'
+            )
+            return
+    
+    # Fallback if data not found
+    await update.message.reply_text(
+        "⚠️ Could not retrieve your premium information. Please contact support.",
+        parse_mode='Markdown'
+    )
+
+# Button handler
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "premium_plans":
+        await plan_command(update, context)
+    elif query.data == "my_plan":
+        await my_plan_command(update, context)
 
 # Optimized token validation with caching
 async def has_valid_token(user_id):
@@ -951,12 +1077,17 @@ async def main_async() -> None:
     application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
     application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
     application.add_handler(CommandHandler("token", token_command))
+    application.add_handler(CommandHandler("plan", plan_command))
+    application.add_handler(CommandHandler("myplan", my_plan_command))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
     
     # Add premium management commands
     application.add_handler(CommandHandler("add", add_premium))
     application.add_handler(CommandHandler("rem", remove_premium))
     application.add_handler(CommandHandler("premium", list_premium))
+    
+    # Add button handler
+    application.add_handler(CallbackQueryHandler(button_handler))
     
     # Start polling
     logger.info("Starting Telegram bot in polling mode...")
