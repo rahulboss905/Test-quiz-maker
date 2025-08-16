@@ -19,7 +19,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ApplicationBuilder,
-    CallbackQueryHandler  # Added missing import
+    CallbackQueryHandler
 )
 from telegram.error import RetryAfter, BadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -53,6 +53,9 @@ SUDO_CACHE = {}
 TOKEN_CACHE = {}
 PREMIUM_CACHE = {}
 CACHE_EXPIRY = 60  # seconds
+
+# Broadcast state
+BROADCAST_STATE = {}
 
 # Flask app for health checks
 app = Flask(__name__)
@@ -422,36 +425,37 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
+
 async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     
-    # Create premium plans message
+    # Create premium plans message with HTML formatting
     plans_message = (
-        "💠 *UPGRADE TO PREMIUM* 💠\n\n"
-        "🚀 *Premium Features:*\n"
-        "🧠 *UNLIMITED QUIZ CREATION*\n\n"
+        "<b>💠 UPGRADE TO PREMIUM 💠</b>\n\n"
+        "<b>🚀 Premium Features:</b>\n"
+        "🧠 UNLIMITED QUIZ CREATION\n\n"
         
-        "🔓 *FREE PLAN* (with restrictions)\n"
-        "🕰️ *Expiry:* Never\n"
-        "💰 *Price:* ₹0\n\n"
+        "<b>🔓 FREE PLAN</b> (with restrictions)\n"
+        "🕰️ <b>Expiry:</b> Never\n"
+        "💰 <b>Price:</b> ₹0\n\n"
         
-        "🕐 *1-DAY PLAN*\n"
-        "💰 *Price:* ₹10 🇮🇳\n"
-        "📅 *Duration:* 1 Day\n\n"
+        "<b>🕐 1-DAY PLAN</b>\n"
+        "💰 <b>Price:</b> ₹10 🇮🇳\n"
+        "📅 <b>Duration:</b> 1 Day\n\n"
         
-        "📆 *1-WEEK PLAN*\n"
-        "💰 *Price:* ₹25 🇮🇳\n"
-        "📅 *Duration:* 10 Days\n\n"
+        "<b>📆 1-WEEK PLAN</b>\n"
+        "💰 <b>Price:</b> ₹25 🇮🇳\n"
+        "📅 <b>Duration:</b> 10 Days\n\n"
         
-        "🗓️ *MONTHLY PLAN*\n"
-        "💰 *Price:* ₹50 🇮🇳\n"
-        "📅 *Duration:* 1 Month\n\n"
+        "<b>🗓️ MONTHLY PLAN</b>\n"
+        "💰 <b>Price:</b> ₹50 🇮🇳\n"
+        "📅 <b>Duration:</b> 1 Month\n\n"
         
-        "🪙 *2-MONTH PLAN*\n"
-        "💰 *Price:* ₹100 🇮🇳\n"
-        "📅 *Duration:* 2 Months\n\n"
+        "<b>🪙 2-MONTH PLAN</b>\n"
+        "💰 <b>Price:</b> ₹100 🇮🇳\n"
+        "📅 <b>Duration:</b> 2 Months\n\n"
         
-        f"📞 *Contact Now to Upgrade*\n👉 {PREMIUM_CONTACT}"
+        f"📞 <b>Contact Now to Upgrade</b>\n👉 {PREMIUM_CONTACT}"
     )
     
     keyboard = [
@@ -462,11 +466,10 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     await update.message.reply_text(
         plans_message,
-        parse_mode='Markdown',
+        parse_mode='HTML',
         reply_markup=reply_markup
     )
 
-    
 async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     await update.message.reply_text(
@@ -689,6 +692,210 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Stats command error: {e}")
         await update.message.reply_text("⚠️ Error retrieving statistics. Please try again later.")
+
+# Broadcast commands
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check if user is owner
+    owner_id = os.getenv('OWNER_ID')
+    if not owner_id or str(update.effective_user.id) != owner_id:
+        await update.message.reply_text("🚫 This command is only available to the bot owner.")
+        return
+        
+    BROADCAST_STATE[update.effective_user.id] = {
+        'state': 'waiting_message',
+        'message': None
+    }
+    
+    await update.message.reply_text(
+        "📢 <b>Broadcast Mode Activated</b>\n\n"
+        "Please send the message you want to broadcast to all users.\n"
+        "You can send text, photos, videos, documents, or any other media.\n\n"
+        "When ready, use /confirm_broadcast to send or /cancel_broadcast to abort.",
+        parse_mode='HTML'
+    )
+
+async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check if user is owner
+    owner_id = os.getenv('OWNER_ID')
+    if not owner_id or str(update.effective_user.id) != owner_id:
+        await update.message.reply_text("🚫 This command is only available to the bot owner.")
+        return
+        
+    user_id = update.effective_user.id
+    if user_id not in BROADCAST_STATE or BROADCAST_STATE[user_id]['state'] != 'ready':
+        await update.message.reply_text("⚠️ No broadcast message prepared. Use /broadcast first.")
+        return
+        
+    broadcast_data = BROADCAST_STATE[user_id]['message']
+    if not broadcast_data:
+        await update.message.reply_text("⚠️ No broadcast message found. Please try again.")
+        return
+        
+    # Get all users from DB
+    if DB is None:
+        await update.message.reply_text("⚠️ Database connection error. Broadcast failed.")
+        return
+        
+    try:
+        total_users = await DB.users.count_documents({})
+        if total_users == 0:
+            await update.message.reply_text("ℹ️ No users found in database.")
+            return
+            
+        progress_msg = await update.message.reply_text(
+            f"📤 Starting broadcast to {total_users} users...\n"
+            "Sent: 0 | Failed: 0"
+        )
+        
+        users = DB.users.find({})
+        sent_count = 0
+        failed_count = 0
+        
+        async for user in users:
+            try:
+                if broadcast_data['type'] == 'text':
+                    await context.bot.send_message(
+                        chat_id=user['user_id'],
+                        text=broadcast_data['content'],
+                        parse_mode=broadcast_data.get('parse_mode', None)
+                    )
+                elif broadcast_data['type'] == 'photo':
+                    await context.bot.send_photo(
+                        chat_id=user['user_id'],
+                        photo=broadcast_data['content'],
+                        caption=broadcast_data.get('caption', ''),
+                        parse_mode=broadcast_data.get('parse_mode', None)
+                    )
+                elif broadcast_data['type'] == 'video':
+                    await context.bot.send_video(
+                        chat_id=user['user_id'],
+                        video=broadcast_data['content'],
+                        caption=broadcast_data.get('caption', ''),
+                        parse_mode=broadcast_data.get('parse_mode', None)
+                    )
+                elif broadcast_data['type'] == 'document':
+                    await context.bot.send_document(
+                        chat_id=user['user_id'],
+                        document=broadcast_data['content'],
+                        caption=broadcast_data.get('caption', ''),
+                        parse_mode=broadcast_data.get('parse_mode', None)
+                    )
+                else:
+                    # Fallback to text
+                    await context.bot.send_message(
+                        chat_id=user['user_id'],
+                        text="📢 New broadcast from admin!",
+                        parse_mode='HTML'
+                    )
+                
+                sent_count += 1
+                
+                # Update progress every 20 messages
+                if sent_count % 20 == 0:
+                    await progress_msg.edit_text(
+                        f"📤 Broadcasting to {total_users} users...\n"
+                        f"Sent: {sent_count} | Failed: {failed_count}"
+                    )
+                
+                # Respect Telegram rate limits (30 messages/second)
+                await asyncio.sleep(0.1)
+                    
+            except Exception as e:
+                logger.error(f"Broadcast failed to {user['user_id']}: {str(e)}")
+                failed_count += 1
+                
+                # If we get rate limited, wait longer
+                if "RetryAfter" in str(e):
+                    wait_time = 5
+                    logger.warning(f"Rate limited. Waiting {wait_time} seconds")
+                    await asyncio.sleep(wait_time)
+        
+        # Final update
+        await progress_msg.edit_text(
+            f"✅ Broadcast completed!\n"
+            f"• Total users: {total_users}\n"
+            f"• Sent successfully: {sent_count}\n"
+            f"• Failed: {failed_count}"
+        )
+        
+        # Clean up broadcast state
+        if user_id in BROADCAST_STATE:
+            del BROADCAST_STATE[user_id]
+            
+    except Exception as e:
+        logger.error(f"Broadcast error: {str(e)}")
+        await update.message.reply_text("⚠️ Error during broadcast. Please try again.")
+
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check if user is owner
+    owner_id = os.getenv('OWNER_ID')
+    if not owner_id or str(update.effective_user.id) != owner_id:
+        await update.message.reply_text("🚫 This command is only available to the bot owner.")
+        return
+        
+    user_id = update.effective_user.id
+    if user_id in BROADCAST_STATE:
+        del BROADCAST_STATE[user_id]
+        
+    await update.message.reply_text("❌ Broadcast cancelled.")
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check if user is in broadcast state
+    user_id = update.effective_user.id
+    if user_id not in BROADCAST_STATE or BROADCAST_STATE[user_id]['state'] != 'waiting_message':
+        return
+        
+    # Process different message types
+    broadcast_data = {}
+    
+    if update.message.text:
+        broadcast_data['type'] = 'text'
+        broadcast_data['content'] = update.message.text_html if update.message.text_html else update.message.text
+        broadcast_data['parse_mode'] = 'HTML'
+    elif update.message.photo:
+        broadcast_data['type'] = 'photo'
+        broadcast_data['content'] = update.message.photo[-1].file_id  # Highest resolution
+        broadcast_data['caption'] = update.message.caption_html if update.message.caption_html else update.message.caption
+        broadcast_data['parse_mode'] = 'HTML'
+    elif update.message.video:
+        broadcast_data['type'] = 'video'
+        broadcast_data['content'] = update.message.video.file_id
+        broadcast_data['caption'] = update.message.caption_html if update.message.caption_html else update.message.caption
+        broadcast_data['parse_mode'] = 'HTML'
+    elif update.message.document:
+        broadcast_data['type'] = 'document'
+        broadcast_data['content'] = update.message.document.file_id
+        broadcast_data['caption'] = update.message.caption_html if update.message.caption_html else update.message.caption
+        broadcast_data['parse_mode'] = 'HTML'
+    else:
+        await update.message.reply_text("⚠️ Unsupported message type for broadcast. Please send text or media.")
+        return
+        
+    # Save broadcast message and update state
+    BROADCAST_STATE[user_id] = {
+        'state': 'ready',
+        'message': broadcast_data
+    }
+    
+    # Preview the broadcast
+    preview_text = (
+        "📢 <b>Broadcast Preview</b>\n\n"
+        "This is how your message will appear to users:\n\n"
+    )
+    
+    if broadcast_data['type'] == 'text':
+        preview_text += broadcast_data['content']
+    else:
+        preview_text += f"<b>Type:</b> {broadcast_data['type'].capitalize()}\n"
+        if broadcast_data.get('caption'):
+            preview_text += f"<b>Caption:</b>\n{broadcast_data['caption']}"
+    
+    preview_text += "\n\nUse /confirm_broadcast to send or /cancel_broadcast to abort."
+    
+    await update.message.reply_text(
+        preview_text,
+        parse_mode='HTML'
+    )
 
 # Premium management commands
 async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1069,6 +1276,12 @@ async def main_async() -> None:
     application.add_handler(CommandHandler("plan", plan_command))
     application.add_handler(CommandHandler("myplan", my_plan_command))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
+    
+    # Add broadcast commands
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast))
+    application.add_handler(CommandHandler("cancel_broadcast", cancel_broadcast))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_broadcast_message))
     
     # Add premium management commands
     application.add_handler(CommandHandler("add", add_premium))
