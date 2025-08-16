@@ -21,8 +21,9 @@ from telegram.ext import (
     ApplicationBuilder
 )
 from telegram.error import RetryAfter, BadRequest
-from pymongo import MongoClient
+from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
+import concurrent.futures
 
 # Configure logging
 logging.basicConfig(
@@ -33,14 +34,22 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "7.5"  # Fixed clone feature
-temp_params = {}  # Temporary storage for verification params
+BOT_VERSION = "8.0"  # Performance optimized version
+temp_params = {}
+DB = None  # Global async database instance
+MONGO_CLIENT = None  # Global MongoDB client
+SESSION = None  # Global aiohttp session
 
 # API Configuration
 AD_API = os.getenv('AD_API', '446b3a3f0039a2826f1483f22e9080963974ad3b')
 WEBSITE_URL = os.getenv('WEBSITE_URL', 'upshrink.com')
-YOUTUBE_TUTORIAL = "https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht"  # Added tutorial link
-GITHUB_REPO = "https://github.com/yourusername/your-repo"  # Replace with your actual GitHub repo
+YOUTUBE_TUTORIAL = "https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht"
+GITHUB_REPO = "https://github.com/yourusername/your-repo"
+
+# Caches for performance
+SUDO_CACHE = {}
+TOKEN_CACHE = {}
+CACHE_EXPIRY = 60  # seconds
 
 # Flask app for health checks
 app = Flask(__name__)
@@ -53,109 +62,96 @@ def health_check():
 
 def run_flask():
     port = int(os.environ.get('PORT', 8000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
 
-# MongoDB connection function
-def get_db():
+# Async MongoDB connection
+async def init_db():
+    global DB, MONGO_CLIENT
     try:
         mongo_uri = os.getenv('MONGO_URI')
         if not mongo_uri:
             logger.error("MONGO_URI environment variable not set")
             return None
             
-        client = MongoClient(mongo_uri)
-        # Use a more reliable connection test
-        client.server_info()  # This will force a connection attempt
+        MONGO_CLIENT = AsyncIOMotorClient(mongo_uri, maxPoolSize=100, minPoolSize=10)
+        DB = MONGO_CLIENT.get_database("telegram_bot")
+        await DB.command('ping')  # Test connection
         logger.info("MongoDB connection successful")
-        return client.telegram_bot
+        return DB
     except Exception as e:
         logger.error(f"MongoDB connection error: {e}")
         return None
 
 # Create TTL index for token expiration
-def create_ttl_index():
+async def create_ttl_index():
     try:
-        db = get_db()
-        if db is not None:
-            tokens = db.tokens
-            tokens.create_index("expires_at", expireAfterSeconds=0)
+        if DB is not None:
+            await DB.tokens.create_index("expires_at", expireAfterSeconds=0)
             logger.info("Created TTL index for token expiration")
     except Exception as e:
         logger.error(f"Error creating TTL index: {e}")
 
 # Create index for sudo users
-def create_sudo_index():
+async def create_sudo_index():
     try:
-        db = get_db()
-        if db is not None:
-            sudo_users = db.sudo_users
-            sudo_users.create_index("user_id", unique=True)
+        if DB is not None:
+            await DB.sudo_users.create_index("user_id", unique=True)
             logger.info("Created index for sudo_users")
     except Exception as e:
         logger.error(f"Error creating sudo index: {e}")
 
 # Create index for cloned bots
-def create_clone_index():
+async def create_clone_index():
     try:
-        db = get_db()
-        if db is not None:
-            cloned_bots = db.cloned_bots
-            cloned_bots.create_index("user_id")
-            cloned_bots.create_index("token")
+        if DB is not None:
+            await DB.cloned_bots.create_index("user_id")
+            await DB.cloned_bots.create_index("token")
             logger.info("Created index for cloned_bots")
     except Exception as e:
         logger.error(f"Error creating clone index: {e}")
 
-# Record user interaction
+# Optimized user interaction recording
 async def record_user_interaction(update: Update):
     try:
-        db = get_db()
-        if db is None:
+        if DB is None:
             return
             
         user = update.effective_user
         if not user:
             return
             
-        users = db.users
-        user_data = {
-            "user_id": user.id,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "username": user.username,
-            "last_interaction": datetime.utcnow()
-        }
-        
-        # Update or insert user record
-        users.update_one(
+        # Use update with upsert
+        await DB.users.update_one(
             {"user_id": user.id},
-            {"$set": user_data},
+            {"$set": {
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "username": user.username,
+                "last_interaction": datetime.utcnow()
+            }},
             upsert=True
         )
-        logger.info(f"Recorded interaction for user {user.id}")
     except Exception as e:
         logger.error(f"Error saving user data: {e}")
 
 # Generate a random parameter
 def generate_random_param(length=8):
-    """Generate a random parameter for verification"""
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
-# Get shortened URL using ad_api service
+# Optimized URL shortening with connection pooling
 async def get_shortened_url(deep_link):
-    """Shorten URL using ad_api service"""
+    global SESSION
     try:
+        if SESSION is None:
+            SESSION = aiohttp.ClientSession()
+            
         api_url = f"https://{WEBSITE_URL}/api?api={AD_API}&url={deep_link}"
-        
-        # Use timeout to prevent hanging
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(api_url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("status") == "success":
-                        return data.get("shortenedUrl")
+        async with SESSION.get(api_url, timeout=5) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data.get("status") == "success":
+                    return data.get("shortenedUrl")
         return None
     except asyncio.TimeoutError:
         logger.warning("URL shortening timed out")
@@ -164,26 +160,37 @@ async def get_shortened_url(deep_link):
         logger.error(f"URL shortening failed: {e}")
         return None
 
-# Check if user is sudo
-def is_sudo(user_id):
-    """Check if user is sudo (owner or in sudo list)"""
+# Optimized sudo check with caching
+async def is_sudo(user_id):
+    # Check cache first
+    cached = SUDO_CACHE.get(user_id)
+    if cached and time.time() < cached['expiry']:
+        return cached['result']
+        
     owner_id = os.getenv('OWNER_ID')
     if owner_id and str(user_id) == owner_id:
-        return True
-        
-    db = get_db()
-    if db is None:
-        return False
-        
-    sudo_users = db.sudo_users
-    return sudo_users.find_one({"user_id": user_id}) is not None
+        result = True
+    else:
+        result = False
+        if DB is not None:
+            try:
+                result = await DB.sudo_users.find_one({"user_id": user_id}) is not None
+            except Exception as e:
+                logger.error(f"Sudo check error: {e}")
+    
+    # Update cache
+    SUDO_CACHE[user_id] = {
+        'result': result,
+        'expiry': time.time() + CACHE_EXPIRY
+    }
+    return result
 
 # Clone command handler
 async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     
     # Check if user is sudo
-    if not is_sudo(update.effective_user.id):
+    if not await is_sudo(update.effective_user.id):
         await update.message.reply_text(
             "🔒 This command is only available to sudo users!",
             parse_mode='Markdown'
@@ -223,10 +230,8 @@ async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         bot_username = bot_info.username
         
         # Save to database
-        db = get_db()
-        if db is not None:  # Explicit None check
-            cloned_bots = db.cloned_bots
-            cloned_bots.insert_one({
+        if DB is not None:
+            await DB.cloned_bots.insert_one({
                 "user_id": update.effective_user.id,
                 "token": bot_token,
                 "bot_username": bot_username,
@@ -278,8 +283,8 @@ def run_cloned_bot(token: str):
     try:
         logger.info(f"Starting cloned bot with token: {token[:10]}...")
         
-        # Create application for the cloned bot
-        application = ApplicationBuilder().token(token).build()
+        # Create application with optimized settings
+        application = ApplicationBuilder().token(token).pool_timeout(30).build()
         
         # Add handlers for the cloned bot
         application.add_handler(CommandHandler("start", start_wrapper))
@@ -288,8 +293,13 @@ def run_cloned_bot(token: str):
         application.add_handler(CommandHandler("token", token_command))
         application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
         
-        # Start polling
-        application.run_polling()
+        # Start polling with optimized parameters
+        application.run_polling(
+            poll_interval=0.1, 
+            timeout=10,
+            connect_timeout=10,
+            read_timeout=10
+        )
         logger.info(f"Cloned bot with token {token[:10]}... is now running")
     except Exception as e:
         logger.error(f"Failed to start cloned bot: {e}", exc_info=True)
@@ -301,7 +311,7 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = user.id
     
     # Sudo users don't need tokens
-    if is_sudo(user_id):
+    if await is_sudo(user_id):
         await update.message.reply_text(
             "🌟 You are a sudo user! You don't need a token to use the bot.",
             parse_mode='Markdown'
@@ -360,9 +370,8 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # Token verification helper
 async def check_token_or_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE, handler):
-    """Check if user is sudo or has valid token"""
     user_id = update.effective_user.id
-    if is_sudo(user_id) or await has_valid_token(user_id):
+    if await is_sudo(user_id) or await has_valid_token(user_id):
         return await handler(update, context)
     
     await update.message.reply_text(
@@ -382,15 +391,13 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Check if it's a verification token
         if user_id in temp_params and temp_params[user_id] == token:
             # Store token in database
-            db = get_db()
-            if db is not None:
-                tokens = db.tokens
-                tokens.update_one(
+            if DB is not None:
+                await DB.tokens.update_one(
                     {"user_id": user_id},
                     {"$set": {
                         "token": token,
                         "created_at": datetime.utcnow(),
-                        "expires_at": datetime.utcnow() + timedelta(hours=24)  # Changed to 24 hours
+                        "expires_at": datetime.utcnow() + timedelta(hours=24)
                     }},
                     upsert=True
                 )
@@ -398,7 +405,7 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # Remove temp param and notify user
             del temp_params[user_id]
             await update.message.reply_text(
-                "✅ Token activated successfully! Enjoy your 24-hour access.",  # Updated message
+                "✅ Token activated successfully! Enjoy your 24-hour access.",
                 parse_mode='Markdown'
             )
         else:
@@ -435,7 +442,6 @@ async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_
 # Original command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
-    """Send welcome message and instructions"""
     welcome_msg = (
         "🌟 *Welcome to Quiz Bot!* 🌟\n\n"
         "I can turn your text files into interactive 10-second quizzes!\n\n"
@@ -446,7 +452,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     
     # Add token status for non-sudo users
-    if not is_sudo(update.effective_user.id):
+    if not await is_sudo(update.effective_user.id):
         welcome_msg += (
             "🔒 You need a token to access all features\n"
             "Get your access token with /token - Valid for 24 hours\n\n"
@@ -471,8 +477,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
-    """Show detailed formatting instructions"""
-    # Create keyboard with tutorial button
     keyboard = [[
         InlineKeyboardButton(
             "🎥 Watch Tutorial",
@@ -509,7 +513,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
-    """Initiate quiz creation process"""
     await update.message.reply_text(
         "📤 *Ready to create your quiz!*\n\n"
         "Please send me a .txt file containing your questions.\n\n"
@@ -518,58 +521,56 @@ async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 def parse_quiz_file(content: str) -> tuple:
-    """Parse and validate quiz content"""
-    blocks = [b.strip() for b in content.split('\n\n') if b.strip()]
+    """Optimized quiz parser"""
+    blocks = content.split('\n\n')
     valid_questions = []
     errors = []
     
     for i, block in enumerate(blocks, 1):
-        lines = [line.strip() for line in block.split('\n') if line.strip()]
-        
-        if len(lines) not in (6, 7):
-            errors.append(f"❌ Question {i}: Invalid line count ({len(lines)}), expected 6 or 7")
+        if not block.strip():
             continue
             
-        question = lines[0]
-        options = lines[1:5]
-        answer_line = lines[5]
-        explanation = lines[6] if len(lines) == 7 else None
+        lines = block.split('\n')
+        # Fast validation
+        if len(lines) < 6 or len(lines) > 7:
+            errors.append(f"❌ Question {i}: Invalid line count ({len(lines)})")
+            continue
+            
+        # Process lines
+        question = lines[0].strip()
+        options = [line.strip() for line in lines[1:5]]
+        answer_line = lines[5].strip()
         
-        # Validate answer format
-        answer_error = None
+        # Answer validation
         if not answer_line.lower().startswith('answer:'):
-            answer_error = "Missing 'Answer:' prefix"
-        else:
-            try:
-                answer_num = int(answer_line.split(':')[1].strip())
-                if not 1 <= answer_num <= 4:
-                    answer_error = f"Invalid answer number {answer_num}"
-            except (ValueError, IndexError):
-                answer_error = "Malformed answer line"
-        
-        if answer_error:
-            errors.append(f"❌ Q{i}: {answer_error}")
-        else:
-            option_texts = options
-            correct_id = int(answer_line.split(':')[1].strip()) - 1
-            valid_questions.append((question, option_texts, correct_id, explanation))
+            errors.append(f"❌ Q{i}: Missing 'Answer:' prefix")
+            continue
+            
+        try:
+            answer_num = int(answer_line.split(':', 1)[1].strip())
+            if not 1 <= answer_num <= 4:
+                errors.append(f"❌ Q{i}: Invalid answer number {answer_num}")
+                continue
+        except (ValueError, IndexError):
+            errors.append(f"❌ Q{i}: Malformed answer line")
+            continue
+            
+        explanation = lines[6].strip() if len(lines) > 6 else None
+        valid_questions.append((question, options, answer_num - 1, explanation))
     
     return valid_questions, errors
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
-    """Process uploaded quiz file"""
     if not update.message.document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Please send a .txt file")
         return
     
     try:
-        # Download file
+        # Download directly to memory
         file = await context.bot.get_file(update.message.document.file_id)
-        await file.download_to_drive('quiz.txt')
-        
-        with open('quiz.txt', 'r', encoding='utf-8') as f:
-            content = f.read()
+        content = await file.download_as_bytearray()
+        content = content.decode('utf-8')
         
         # Parse and validate
         valid_questions, errors = parse_quiz_file(content)
@@ -583,14 +584,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"⚠️ Found {len(errors)} error(s):\n\n{error_msg}"
             )
         
-        # Send quizzes
+        # Send quizzes with rate limiting
         if valid_questions:
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 f"✅ Sending {len(valid_questions)} quiz question(s)..."
             )
             
-            # Send all quizzes asynchronously
-            send_tasks = []
+            sent_count = 0
             for question, options, correct_id, explanation in valid_questions:
                 try:
                     poll_params = {
@@ -606,15 +606,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     if explanation:
                         poll_params["explanation"] = explanation
                     
-                    # Create task but don't await immediately
-                    task = context.bot.send_poll(**poll_params)
-                    send_tasks.append(task)
+                    await context.bot.send_poll(**poll_params)
+                    sent_count += 1
+                    
+                    # Update progress every 5 questions
+                    if sent_count % 5 == 0:
+                        await msg.edit_text(
+                            f"✅ Sent {sent_count}/{len(valid_questions)} questions..."
+                        )
+                    
+                    # Rate limit: 20 messages per second (Telegram limit)
+                    await asyncio.sleep(0.05)
+                    
+                except RetryAfter as e:
+                    # Handle flood control
+                    wait_time = e.retry_after + 1
+                    logger.warning(f"Rate limited. Waiting {wait_time} seconds")
+                    await asyncio.sleep(wait_time)
+                    continue
                 except Exception as e:
                     logger.error(f"Poll creation error: {str(e)}")
             
-            # Send all quizzes concurrently
-            await asyncio.gather(*send_tasks, return_exceptions=True)
-            
+            await msg.edit_text(
+                f"✅ Successfully sent {sent_count} quiz questions!"
+            )
         else:
             await update.message.reply_text("❌ No valid questions found in file")
             
@@ -631,27 +646,19 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("🚫 This command is only available to the bot owner.")
         return
 
-    db = get_db()
-    if db is None:
+    if DB is None:
         await update.message.reply_text("⚠️ Database connection error. Stats unavailable.")
         return
         
     try:
-        # Calculate stats
-        users = db.users
-        total_users = users.count_documents({})
-        
-        # Get token usage stats
-        tokens = db.tokens
-        active_tokens = tokens.count_documents({})
-        
-        # Get sudo users count
-        sudo_users = db.sudo_users
-        sudo_count = sudo_users.count_documents({})
-        
-        # Get cloned bots count
-        cloned_bots = db.cloned_bots
-        clone_count = cloned_bots.count_documents({})
+        # Calculate stats concurrently
+        tasks = [
+            DB.users.count_documents({}),
+            DB.tokens.count_documents({}),
+            DB.sudo_users.count_documents({}),
+            DB.cloned_bots.count_documents({})
+        ]
+        total_users, active_tokens, sudo_count, clone_count = await asyncio.gather(*tasks)
         
         # Ping calculation
         start_time = time.time()
@@ -705,31 +712,31 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Get the replied message
     replied_msg = update.message.reply_to_message
         
-    db = get_db()
-    if db is None:
+    if DB is None:
         await update.message.reply_text("⚠️ Database connection error. Broadcast unavailable.")
         return
         
     try:
-        users = db.users
-        user_ids = [user["user_id"] for user in users.find({}, {"user_id": 1})]
+        # Get user IDs efficiently
+        user_ids = []
+        async for user in DB.users.find({}, {"user_id": 1}):
+            user_ids.append(user["user_id"])
+        
         total_users = len(user_ids)
         
         if not user_ids:
             await update.message.reply_text("⚠️ No users found in database.")
             return
             
-        # Create preview message with HTML formatting
+        # Create preview message
         preview_html = "📢 <b>Broadcast Preview</b>\n\n"
         preview_html += f"• Recipients: {total_users} users\n\n"
         
         if replied_msg.text:
-            # Escape and truncate text
             safe_content = html.escape(replied_msg.text)
             display_text = safe_content[:300] + ("..." if len(safe_content) > 300 else "")
             preview_html += f"Content:\n<pre>{display_text}</pre>"
         elif replied_msg.caption:
-            # Escape and truncate caption
             safe_caption = html.escape(replied_msg.caption)
             caption_snippet = safe_caption[:100] + ("..." if len(safe_caption) > 100 else "")
             preview_html += f"Caption:\n<pre>{caption_snippet}</pre>"
@@ -740,12 +747,11 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             elif replied_msg.document: media_type = "document"
             elif replied_msg.sticker: media_type = "sticker"
             elif replied_msg.audio: media_type = "audio"
-            elif replied_msg.voice: media_type = "voice"
             preview_html += f"✅ Ready to send {html.escape(media_type)} message"
             
         preview_html += "\n\nType /confirm_broadcast to send or /cancel to abort."
         
-        # Send preview with HTML parsing
+        # Send preview
         preview_msg = await update.message.reply_text(
             preview_html,
             parse_mode='HTML'
@@ -762,24 +768,18 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.error(f"Broadcast preparation error: {e}")
         await update.message.reply_text("⚠️ Error preparing broadcast. Please try again later.")
 
-async def send_broadcast_message(context, user_id, message):
-    """Send broadcast message to a specific user with error handling"""
+async def send_broadcast_message(user_id, message):
+    """Send broadcast message with better error handling"""
     try:
-        # Copy message to user
         await message.copy(chat_id=user_id)
         return True, None
     except RetryAfter as e:
-        # Wait for the specified time plus a small buffer
         wait_time = e.retry_after + 0.5
         logger.warning(f"Rate limited for {user_id}: Waiting {wait_time} seconds")
         await asyncio.sleep(wait_time)
-        # Retry after waiting
-        return await send_broadcast_message(context, user_id, message)
+        return await send_broadcast_message(user_id, message)
     except (BadRequest, Exception) as e:
-        error_type = type(e).__name__
-        error_details = str(e)
-        logger.warning(f"Failed to send to {user_id}: {error_type} - {error_details}")
-        return False, f"{user_id}: {error_type} - {error_details}"
+        return False, f"{user_id}: {type(e).__name__}"
 
 async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
@@ -809,27 +809,37 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         failed = 0
         failed_details = []
         
-        # Send messages with rate limiting
-        for i, user_id in enumerate(user_ids):
-            result, error = await send_broadcast_message(context, user_id, message_to_broadcast)
+        # Use semaphore to limit concurrency
+        semaphore = asyncio.Semaphore(5)  # 5 concurrent sends
+        
+        async def send_to_user(user_id):
+            nonlocal success, failed
+            async with semaphore:
+                result, error = await send_broadcast_message(user_id, message_to_broadcast)
+                if result:
+                    success += 1
+                else:
+                    failed += 1
+                    if error and len(failed_details) < 20:
+                        failed_details.append(error)
+                return user_id
+        
+        # Batch processing
+        batch_size = 50
+        for i in range(0, total_users, batch_size):
+            batch = user_ids[i:i+batch_size]
+            await asyncio.gather(*(send_to_user(uid) for uid in batch))
             
-            if result:
-                success += 1
-            else:
-                failed += 1
-                if error and len(failed_details) < 20:
-                    failed_details.append(error)
+            # Update progress
+            percent = min((i + len(batch)) * 100 // total_users, 100)
+            await status_msg.edit_text(
+                f"📤 Broadcasting to {total_users} users...\n\n"
+                f"{i+len(batch)}/{total_users} ({percent}%)\n"
+                f"✅ Success: {success} | ❌ Failed: {failed}"
+            )
             
-            # Update progress every 20 users or last user
-            if (i + 1) % 20 == 0 or (i + 1) == total_users:
-                percent = (i + 1) * 100 // total_users
-                await status_msg.edit_text(
-                    f"📤 Broadcasting to {total_users} users...\n\n"
-                    f"{i+1}/{total_users} ({percent}%)\n"
-                    f"✅ Success: {success} | ❌ Failed: {failed}"
-                )
-                # Conservative rate limiting
-                await asyncio.sleep(0.1)
+            # Short pause between batches
+            await asyncio.sleep(0.5)
         
         # Prepare final report
         report_text = (
@@ -872,7 +882,6 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # Sudo management commands
 async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add user to sudo list (owner only)"""
     await record_user_interaction(update)
     
     # Verify owner
@@ -900,25 +909,29 @@ async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     # Add to sudo list
-    db = get_db()
-    if db is None:
+    if DB is None:
         await update.message.reply_text("⚠️ Database connection error")
         return
         
-    sudo_users = db.sudo_users
-    result = sudo_users.update_one(
-        {"user_id": target_user},
-        {"$set": {"user_id": target_user, "added_at": datetime.utcnow()}},
-        upsert=True
-    )
-    
-    if result.upserted_id or result.modified_count:
-        await update.message.reply_text(f"✅ Added user {target_user} to sudo list!")
-    else:
-        await update.message.reply_text("⚠️ Failed to add user to sudo list")
+    try:
+        result = await DB.sudo_users.update_one(
+            {"user_id": target_user},
+            {"$set": {"user_id": target_user, "added_at": datetime.utcnow()}},
+            upsert=True
+        )
+        
+        if result.upserted_id or result.modified_count:
+            # Clear sudo cache for this user
+            if target_user in SUDO_CACHE:
+                del SUDO_CACHE[target_user]
+            await update.message.reply_text(f"✅ Added user {target_user} to sudo list!")
+        else:
+            await update.message.reply_text("⚠️ Failed to add user to sudo list")
+    except Exception as e:
+        logger.error(f"Add sudo error: {e}")
+        await update.message.reply_text("⚠️ Database error during sudo add")
 
 async def rem_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove user from sudo list (owner only)"""
     await record_user_interaction(update)
     
     # Verify owner
@@ -946,44 +959,70 @@ async def rem_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     # Remove from sudo list
-    db = get_db()
-    if db is None:
+    if DB is None:
         await update.message.reply_text("⚠️ Database connection error")
         return
         
-    sudo_users = db.sudo_users
-    result = sudo_users.delete_one({"user_id": target_user})
-    
-    if result.deleted_count:
-        await update.message.reply_text(f"✅ Removed user {target_user} from sudo list!")
-    else:
-        await update.message.reply_text("⚠️ User not found in sudo list")
+    try:
+        result = await DB.sudo_users.delete_one({"user_id": target_user})
+        
+        if result.deleted_count:
+            # Clear sudo cache for this user
+            if target_user in SUDO_CACHE:
+                del SUDO_CACHE[target_user]
+            await update.message.reply_text(f"✅ Removed user {target_user} from sudo list!")
+        else:
+            await update.message.reply_text("⚠️ User not found in sudo list")
+    except Exception as e:
+        logger.error(f"Remove sudo error: {e}")
+        await update.message.reply_text("⚠️ Database error during sudo removal")
 
-# Check if user has valid token
+# Optimized token validation with caching
 async def has_valid_token(user_id):
-    if is_sudo(user_id):
+    if await is_sudo(user_id):
         return True
         
-    db = get_db()
-    if db is None:
-        return False
+    # Check cache first
+    cached = TOKEN_CACHE.get(user_id)
+    if cached and time.time() < cached['expiry']:
+        return cached['result']
         
-    tokens = db.tokens
-    token_data = tokens.find_one({"user_id": user_id})
+    result = False
+    if DB is not None:
+        try:
+            token_data = await DB.tokens.find_one({"user_id": user_id})
+            result = token_data is not None
+        except Exception as e:
+            logger.error(f"Token check error: {e}")
     
-    return token_data is not None  # TTL index handles expiration
+    # Update cache
+    TOKEN_CACHE[user_id] = {
+        'result': result,
+        'expiry': time.time() + CACHE_EXPIRY
+    }
+    return result
 
-def main() -> None:
-    """Run the bot and HTTP server"""
-    # Create database indexes
-    create_ttl_index()
-    create_sudo_index()
-    create_clone_index()
+async def main_async() -> None:
+    """Async main function"""
+    global DB, SESSION
     
-    # Start Flask server in a daemon thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info(f"Flask server started in separate thread")
+    # Initialize database
+    DB = await init_db()
+    if DB:
+        await asyncio.gather(
+            create_ttl_index(),
+            create_sudo_index(),
+            create_clone_index()
+        )
+    
+    # Start any existing cloned bots
+    if DB is not None:
+        cloned_bots = []
+        async for bot in DB.cloned_bots.find({}):
+            cloned_bots.append(bot['token'])
+        
+        for token in cloned_bots:
+            threading.Thread(target=run_cloned_bot, args=(token,), daemon=True).start()
     
     # Get token from environment
     TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -992,7 +1031,7 @@ def main() -> None:
         return
     
     # Create Telegram application
-    application = Application.builder().token(TOKEN).build()
+    application = ApplicationBuilder().token(TOKEN).pool_timeout(30).build()
     
     # Add handlers
     application.add_handler(CommandHandler("start", start_wrapper))
@@ -1003,26 +1042,56 @@ def main() -> None:
     application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
     application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
     application.add_handler(CommandHandler("token", token_command))
-    application.add_handler(CommandHandler("clone", clone_command))  # Added clone command
+    application.add_handler(CommandHandler("clone", clone_command))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
     
     # Add sudo management commands
     application.add_handler(CommandHandler("addsudo", add_sudo))
     application.add_handler(CommandHandler("remsudo", rem_sudo))
     
-    # Start any existing cloned bots
-    db = get_db()
-    if db is not None:
-        cloned_bots = db.cloned_bots.find({})
-        for bot in cloned_bots:
-            threading.Thread(target=run_cloned_bot, args=(bot['token'],), daemon=True).start()
-    
     # Start polling
     logger.info("Starting Telegram bot in polling mode...")
     try:
-        application.run_polling()
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(
+            poll_interval=0.1,
+            timeout=10,
+            read_timeout=10
+        )
+        logger.info("Bot is now running")
+        
+        # Keep running until interrupted
+        while True:
+            await asyncio.sleep(3600)
+            
+    except asyncio.CancelledError:
+        pass
     except Exception as e:
         logger.critical(f"Telegram bot failed: {e}")
+    finally:
+        # Cleanup
+        if SESSION:
+            await SESSION.close()
+        if MONGO_CLIENT:
+            MONGO_CLIENT.close()
+        await application.stop()
+        logger.info("Bot stopped gracefully")
+
+def main() -> None:
+    """Run the bot and HTTP server"""
+    # Start Flask server in a daemon thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"Flask server started in separate thread")
+    
+    # Run async main
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}")
         # Attempt to restart after delay
         time.sleep(10)
         main()
