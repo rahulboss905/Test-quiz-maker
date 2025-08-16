@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Global variables
 bot_start_time = time.time()
-BOT_VERSION = "8.0"  # Performance optimized version
+BOT_VERSION = "8.1"  # Premium features version
 temp_params = {}
 DB = None  # Global async database instance
 MONGO_CLIENT = None  # Global MongoDB client
@@ -49,6 +49,7 @@ GITHUB_REPO = "https://github.com/yourusername/your-repo"
 # Caches for performance
 SUDO_CACHE = {}
 TOKEN_CACHE = {}
+PREMIUM_CACHE = {}
 CACHE_EXPIRY = 60  # seconds
 
 # Flask app for health checks
@@ -100,15 +101,15 @@ async def create_sudo_index():
     except Exception as e:
         logger.error(f"Error creating sudo index: {e}")
 
-# Create index for cloned bots
-async def create_clone_index():
+# Create index for premium users
+async def create_premium_index():
     try:
         if DB is not None:
-            await DB.cloned_bots.create_index("user_id")
-            await DB.cloned_bots.create_index("token")
-            logger.info("Created index for cloned_bots")
+            await DB.premium_users.create_index("user_id", unique=True)
+            await DB.premium_users.create_index("expiry_date")
+            logger.info("Created index for premium_users")
     except Exception as e:
-        logger.error(f"Error creating clone index: {e}")
+        logger.error(f"Error creating premium index: {e}")
 
 # Optimized user interaction recording
 async def record_user_interaction(update: Update):
@@ -187,135 +188,16 @@ async def is_sudo(user_id):
     }
     return result
 
-# Clone command handler
-async def clone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    
-    # Check if user is sudo
-    if not await is_sudo(update.effective_user.id):
-        await update.message.reply_text(
-            "🔒 This command is only available to sudo users!",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Check if message is a reply
-    if not update.message.reply_to_message or not update.message.reply_to_message.text:
-        await update.message.reply_text(
-            "🔍 Please reply to a message containing a bot token.\n\n"
-            "Format: /clone [reply to token message]",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Extract token from replied message
-    token_message = update.message.reply_to_message.text
-    token_match = re.search(r'(\d{8,10}:[a-zA-Z0-9_-]{35})', token_message)
-    
-    if not token_match:
-        await update.message.reply_text(
-            "❌ No valid bot token found in the replied message.\n\n"
-            "A bot token should look like: 123456789:ABCdefGHIJKlmnoPQRSTUVWXYZ0123456789",
-            parse_mode='Markdown'
-        )
-        return
-    
-    bot_token = token_match.group(1)
-    
-    # Verify the token
-    try:
-        # Create a temporary application to verify the token
-        temp_app = ApplicationBuilder().token(bot_token).build()
-        await temp_app.initialize()
-        await temp_app.start()
-        bot_info = await temp_app.bot.get_me()
-        bot_username = bot_info.username
-        
-        # Save to database - check if DB is initialized (not None)
-        if DB is not None:
-            await DB.cloned_bots.insert_one({
-                "user_id": update.effective_user.id,
-                "token": bot_token,
-                "bot_username": bot_username,
-                "created_at": datetime.utcnow()
-            })
-        else:
-            logger.error("Database connection failed during clone operation")
-        
-        # Create response
-        response = (
-            f"✅ Bot cloned successfully!\n\n"
-            f"• Bot: @{bot_username}\n"
-            f"• Token: `{bot_token[:10]}...`\n\n"
-            f"Your bot has been added to the clone system and will receive updates."
-        )
-        
-        keyboard = [[
-            InlineKeyboardButton(
-                "🔗 Open Bot",
-                url=f"https://t.me/{bot_username}"
-            ),
-            InlineKeyboardButton(
-                "📦 GitHub Repo",
-                url=GITHUB_REPO
-            )
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            response,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-        
-        # Initialize and start the cloned bot in a new thread
-        threading.Thread(target=run_cloned_bot, args=(bot_token,), daemon=True).start()
-        
-    except Exception as e:
-        logger.error(f"Token verification failed: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"❌ Failed to verify bot token: {str(e)}\n\n"
-            "Please check that the token is correct and try again.",
-            parse_mode='Markdown'
-        )
-
-# Function to run a cloned bot
-def run_cloned_bot(token: str):
-    """Run a cloned bot in a separate thread"""
-    try:
-        logger.info(f"Starting cloned bot with token: {token[:10]}...")
-        
-        # Create application with optimized settings
-        application = ApplicationBuilder().token(token).pool_timeout(30).build()
-        
-        # Add handlers for the cloned bot
-        application.add_handler(CommandHandler("start", start_wrapper))
-        application.add_handler(CommandHandler("help", help_command_wrapper))
-        application.add_handler(CommandHandler("createquiz", create_quiz_wrapper))
-        application.add_handler(CommandHandler("token", token_command))
-        application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
-        
-        # Start polling with optimized parameters
-        application.run_polling(
-            poll_interval=0.1, 
-            timeout=10,
-            connect_timeout=10,
-            read_timeout=10
-        )
-        logger.info(f"Cloned bot with token {token[:10]}... is now running")
-    except Exception as e:
-        logger.error(f"Failed to start cloned bot: {e}", exc_info=True)
-
-# Token command
+# Premium token command
 async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     user = update.effective_user
     user_id = user.id
     
-    # Sudo users don't need tokens
-    if await is_sudo(user_id):
+    # Premium and sudo users don't need tokens
+    if await is_sudo(user_id) or await is_premium(user_id):
         await update.message.reply_text(
-            "🌟 You are a sudo user! You don't need a token to use the bot.",
+            "🌟 You are a premium user! You don't need a token to use the bot.",
             parse_mode='Markdown'
         )
         return
@@ -371,18 +253,18 @@ async def token_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 # Token verification helper
-async def check_token_or_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE, handler):
+async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE, handler):
     user_id = update.effective_user.id
-    if await is_sudo(user_id) or await has_valid_token(user_id):
+    if await is_sudo(user_id) or await is_premium(user_id) or await has_valid_token(user_id):
         return await handler(update, context)
     
     await update.message.reply_text(
-        "🔒 Access restricted! You need a valid token to use this feature.\n\n"
-        "Use /token to get your access token.",
+        "🔒 Access restricted! You need premium or a valid token to use this feature.\n\n"
+        "Use /token to get your access token or contact us for premium.",
         parse_mode='Markdown'
     )
 
-# Wrapper functions for token verification
+# Wrapper functions for access verification
 async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Handle token activation
     if context.args and context.args[0]:
@@ -421,25 +303,25 @@ async def start_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await start(update, context)
 
 async def help_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, help_command)
+    await check_access(update, context, help_command)
 
 async def create_quiz_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, create_quiz)
+    await check_access(update, context, create_quiz)
 
 async def stats_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, stats_command)
+    await check_access(update, context, stats_command)
 
 async def broadcast_command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, broadcast_command)
+    await check_access(update, context, broadcast_command)
 
 async def confirm_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, confirm_broadcast)
+    await check_access(update, context, confirm_broadcast)
 
 async def cancel_broadcast_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, cancel_broadcast)
+    await check_access(update, context, cancel_broadcast)
 
 async def handle_document_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_token_or_sudo(update, context, handle_document)
+    await check_access(update, context, handle_document)
 
 # Original command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -450,13 +332,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔹 Use /createquiz - Start quiz creation\n"
         "🔹 Use /help - Show formatting guide\n"
         "🔹 Use /token - Get your access token\n"
-        "🔹 Sudo users: /clone - Clone bots\n\n"
+        "🔹 Premium users get unlimited access!\n\n"
     )
     
-    # Add token status for non-sudo users
-    if not await is_sudo(update.effective_user.id):
+    # Add token status for non-premium users
+    if not (await is_sudo(update.effective_user.id) or await is_premium(update.effective_user.id)):
         welcome_msg += (
-            "🔒 You need a token to access all features\n"
+            "🔒 You need premium or a token to access all features\n"
             "Get your access token with /token - Valid for 24 hours\n\n"
         )
     
@@ -467,6 +349,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton(
             "🎥 Watch Tutorial",
             url=YOUTUBE_TUTORIAL
+        ),
+        InlineKeyboardButton(
+            "💎 Get Premium",
+            url="https://t.me/your_premium_channel"
         )
     ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -483,6 +369,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         InlineKeyboardButton(
             "🎥 Watch Tutorial",
             url=YOUTUBE_TUTORIAL
+        ),
+        InlineKeyboardButton(
+            "💎 Get Premium",
+            url="https://t.me/your_premium_channel"
         )
     ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -508,7 +398,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• One question per block (separated by blank lines)\n"
         "• Exactly 4 options (any prefix format accepted)\n"
         "• Answer format: 'Answer: <1-4>' (1=first option, 2=second, etc.)\n"
-        "• Optional 7th line for explanation (any text)",
+        "• Optional 7th line for explanation (any text)\n\n"
+        "💡 *Premium Benefits:*\n"
+        "- Unlimited quiz creation\n"
+        "- No token required\n"
+        "- Priority support",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -563,7 +457,39 @@ def parse_quiz_file(content: str) -> tuple:
     return valid_questions, errors
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    user_id = user.id
     await record_user_interaction(update)
+    
+    # Check if user is premium
+    is_prem = await is_premium(user_id)
+    
+    # For token users, check daily quiz limit (20 quizzes)
+    if not is_prem:
+        # Get today's date
+        today = datetime.utcnow().date()
+        
+        # Check if user has exceeded daily limit
+        if DB is not None:
+            user_data = await DB.users.find_one({"user_id": user_id})
+            if user_data:
+                last_quiz_date = user_data.get("last_quiz_date")
+                quiz_count = user_data.get("quiz_count", 0)
+                
+                # Reset count if it's a new day
+                if last_quiz_date != today:
+                    quiz_count = 0
+                
+                # Check if user has exceeded limit
+                if quiz_count >= 20:
+                    await update.message.reply_text(
+                        "⚠️ You've reached your daily quiz limit (20 quizzes).\n\n"
+                        "Token users are limited to 20 quizzes per day.\n"
+                        "Upgrade to premium for unlimited access!",
+                        parse_mode='Markdown'
+                    )
+                    return
+    
     if not update.message.document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Please send a .txt file")
         return
@@ -629,6 +555,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except Exception as e:
                     logger.error(f"Poll creation error: {str(e)}")
             
+            # Update quiz count for token users
+            if not is_prem and DB is not None:
+                today = datetime.utcnow().date()
+                await DB.users.update_one(
+                    {"user_id": user_id},
+                    {
+                        "$set": {"last_quiz_date": today},
+                        "$inc": {"quiz_count": 1}
+                    },
+                    upsert=True
+                )
+            
             await msg.edit_text(
                 f"✅ Successfully sent {sent_count} quiz questions!"
             )
@@ -659,9 +597,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             DB.users.count_documents({}),
             DB.tokens.count_documents({}),
             DB.sudo_users.count_documents({}),
-            DB.cloned_bots.count_documents({})
+            DB.premium_users.count_documents({})
         ]
-        total_users, active_tokens, sudo_count, clone_count = await asyncio.gather(*tasks)
+        total_users, active_tokens, sudo_count, premium_count = await asyncio.gather(*tasks)
         
         # Ping calculation
         start_time = time.time()
@@ -678,7 +616,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"• Total Users: `{total_users}`\n"
             f"• Active Tokens: `{active_tokens}`\n"
             f"• Sudo Users: `{sudo_count}`\n"
-            f"• Cloned Bots: `{clone_count}`\n"
+            f"• Premium Users: `{premium_count}`\n"
             f"• Current Ping: `{ping_time:.2f} ms`\n"
             f"• Uptime: `{uptime}`\n"
             f"• Version: `{BOT_VERSION}`\n\n"
@@ -692,200 +630,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Stats command error: {e}")
         await update.message.reply_text("⚠️ Error retrieving statistics. Please try again later.")
 
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        await update.message.reply_text("🚫 This command is only available to the bot owner.")
-        return
-        
-    # Check if message is a reply
-    if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "📢 <b>Usage Instructions:</b>\n\n"
-            "1. Reply to any message with /broadcast\n"
-            "2. Confirm with /confirm_broadcast\n\n"
-            "Supports: text, photos, videos, documents, stickers, audio",
-            parse_mode='HTML'
-        )
-        return
-        
-    # Get the replied message
-    replied_msg = update.message.reply_to_message
-        
-    # Check if DB is initialized (not None)
-    if DB is None:
-        await update.message.reply_text("⚠️ Database connection error. Broadcast unavailable.")
-        return
-        
-    try:
-        # Get user IDs efficiently
-        user_ids = []
-        async for user in DB.users.find({}, {"user_id": 1}):
-            user_ids.append(user["user_id"])
-        
-        total_users = len(user_ids)
-        
-        if not user_ids:
-            await update.message.reply_text("⚠️ No users found in database.")
-            return
-            
-        # Create preview message
-        preview_html = "📢 <b>Broadcast Preview</b>\n\n"
-        preview_html += f"• Recipients: {total_users} users\n\n"
-        
-        if replied_msg.text:
-            safe_content = html.escape(replied_msg.text)
-            display_text = safe_content[:300] + ("..." if len(safe_content) > 300 else "")
-            preview_html += f"Content:\n<pre>{display_text}</pre>"
-        elif replied_msg.caption:
-            safe_caption = html.escape(replied_msg.caption)
-            caption_snippet = safe_caption[:100] + ("..." if len(safe_caption) > 100 else "")
-            preview_html += f"Caption:\n<pre>{caption_snippet}</pre>"
-        else:
-            media_type = "media"
-            if replied_msg.photo: media_type = "photo"
-            elif replied_msg.video: media_type = "video"
-            elif replied_msg.document: media_type = "document"
-            elif replied_msg.sticker: media_type = "sticker"
-            elif replied_msg.audio: media_type = "audio"
-            preview_html += f"✅ Ready to send {html.escape(media_type)} message"
-            
-        preview_html += "\n\nType /confirm_broadcast to send or /cancel to abort."
-        
-        # Send preview
-        preview_msg = await update.message.reply_text(
-            preview_html,
-            parse_mode='HTML'
-        )
-        
-        # Store broadcast data in context
-        context.user_data["broadcast_data"] = {
-            "message": replied_msg,
-            "user_ids": user_ids,
-            "preview_msg_id": preview_msg.message_id
-        }
-        
-    except Exception as e:
-        logger.error(f"Broadcast preparation error: {e}")
-        await update.message.reply_text("⚠️ Error preparing broadcast. Please try again later.")
-
-async def send_broadcast_message(user_id, message):
-    """Send broadcast message with better error handling"""
-    try:
-        await message.copy(chat_id=user_id)
-        return True, None
-    except RetryAfter as e:
-        wait_time = e.retry_after + 0.5
-        logger.warning(f"Rate limited for {user_id}: Waiting {wait_time} seconds")
-        await asyncio.sleep(wait_time)
-        return await send_broadcast_message(user_id, message)
-    except (BadRequest, Exception) as e:
-        return False, f"{user_id}: {type(e).__name__}"
-
-async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        return
-        
-    broadcast_data = context.user_data.get("broadcast_data")
-    if not broadcast_data:
-        await update.message.reply_text("⚠️ No pending broadcast. Start with /broadcast.")
-        return
-        
-    try:
-        user_ids = broadcast_data["user_ids"]
-        message_to_broadcast = broadcast_data["message"]
-        total_users = len(user_ids)
-        
-        status_msg = await update.message.reply_text(
-            f"📤 Broadcasting to {total_users} users...\n\n"
-            f"0/{total_users} (0%)\n"
-            f"✅ Success: 0 | ❌ Failed: 0"
-        )
-        
-        success = 0
-        failed = 0
-        failed_details = []
-        
-        # Use semaphore to limit concurrency
-        semaphore = asyncio.Semaphore(5)  # 5 concurrent sends
-        
-        async def send_to_user(user_id):
-            nonlocal success, failed
-            async with semaphore:
-                result, error = await send_broadcast_message(user_id, message_to_broadcast)
-                if result:
-                    success += 1
-                else:
-                    failed += 1
-                    if error and len(failed_details) < 20:
-                        failed_details.append(error)
-                return user_id
-        
-        # Batch processing
-        batch_size = 50
-        for i in range(0, total_users, batch_size):
-            batch = user_ids[i:i+batch_size]
-            await asyncio.gather(*(send_to_user(uid) for uid in batch))
-            
-            # Update progress
-            percent = min((i + len(batch)) * 100 // total_users, 100)
-            await status_msg.edit_text(
-                f"📤 Broadcasting to {total_users} users...\n\n"
-                f"{i+len(batch)}/{total_users} ({percent}%)\n"
-                f"✅ Success: {success} | ❌ Failed: {failed}"
-            )
-            
-            # Short pause between batches
-            await asyncio.sleep(0.5)
-        
-        # Prepare final report
-        report_text = (
-            f"✅ Broadcast Complete!\n\n"
-            f"• Recipients: {total_users}\n"
-            f"• Success: {success}\n"
-            f"• Failed: {failed}"
-        )
-        
-        # Add error details if any failures
-        if failed > 0:
-            report_text += f"\n\n📛 Failed Users (Sample):\n"
-            report_text += "\n".join(failed_details[:5])
-            if failed > 5:
-                report_text += f"\n\n...and {failed - 5} more failures"
-        
-        # Update final status
-        await status_msg.edit_text(report_text)
-        
-        # Cleanup
-        del context.user_data["broadcast_data"]
-        
-    except Exception as e:
-        logger.error(f"Broadcast error: {e}")
-        await update.message.reply_text(f"⚠️ Critical broadcast error: {str(e)}")
-
-async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await record_user_interaction(update)
-    
-    # Check if user is owner
-    owner_id = os.getenv('OWNER_ID')
-    if not owner_id or str(update.effective_user.id) != owner_id:
-        return
-        
-    if "broadcast_data" in context.user_data:
-        del context.user_data["broadcast_data"]
-        await update.message.reply_text("✅ Broadcast canceled.")
-    else:
-        await update.message.reply_text("ℹ️ No pending broadcast to cancel.")
-
-# Sudo management commands
-async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# Premium management commands
+async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     
     # Verify owner
@@ -894,48 +640,130 @@ async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("🚫 This command is only available to the bot owner.")
         return
         
-    # Get target user
-    target_user = None
-    if context.args:
-        try:
-            target_user = int(context.args[0])
-        except ValueError:
-            pass
-    elif update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user.id
-    
-    if not target_user:
+    # Check arguments
+    if not context.args or len(context.args) < 2:
         await update.message.reply_text(
             "ℹ️ Usage:\n"
-            "Reply to user's message with /addsudo\n"
-            "Or use /addsudo <user_id>"
+            "/add <username/userid/reply> <duration>\n"
+            "Durations: 1hr, 1day, 1month, 1year\n\n"
+            "Example: /add @username 1month\n"
+            "          /add 123456789 1year\n"
+            "          Reply to a user and use /add 1day"
         )
         return
         
-    # Add to sudo list - check if DB is initialized (not None)
-    if DB is None:
-        await update.message.reply_text("⚠️ Database connection error")
-        return
+    # Get target user
+    target_user = None
+    target_user_id = None
+    target_fullname = "Unknown"
+    
+    # Check if reply
+    if update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        target_user_id = target_user.id
+        target_fullname = target_user.full_name
+    else:
+        # Check if first argument is username or user ID
+        user_ref = context.args[0]
         
-    try:
-        result = await DB.sudo_users.update_one(
-            {"user_id": target_user},
-            {"$set": {"user_id": target_user, "added_at": datetime.utcnow()}},
+        # Try to parse as user ID
+        try:
+            target_user_id = int(user_ref)
+            # Try to get user from database
+            if DB is not None:
+                user_data = await DB.users.find_one({"user_id": target_user_id})
+                if user_data:
+                    target_fullname = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
+        except ValueError:
+            # Not an integer, treat as username
+            username = user_ref.lstrip('@')
+            if DB is not None:
+                user_data = await DB.users.find_one({"username": username})
+                if user_data:
+                    target_user_id = user_data["user_id"]
+                    target_fullname = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
+    
+    # Get duration
+    duration_str = context.args[-1].lower()
+    duration_map = {
+        "1hr": timedelta(hours=1),
+        "1day": timedelta(days=1),
+        "1month": timedelta(days=30),
+        "1year": timedelta(days=365)
+    }
+    
+    if duration_str not in duration_map:
+        await update.message.reply_text("❌ Invalid duration. Use: 1hr, 1day, 1month, 1year")
+        return
+    
+    duration = duration_map[duration_str]
+    
+    if target_user_id is None:
+        await update.message.reply_text("❌ User not found. Please make sure the user has interacted with the bot.")
+        return
+    
+    # Calculate dates
+    now = datetime.utcnow()
+    expiry_date = now + duration
+    
+    # Add to premium collection
+    if DB is not None:
+        await DB.premium_users.update_one(
+            {"user_id": target_user_id},
+            {"$set": {
+                "full_name": target_fullname,
+                "start_date": now,
+                "expiry_date": expiry_date,
+                "added_by": update.effective_user.id,
+                "plan": duration_str
+            }},
             upsert=True
         )
         
-        if result.upserted_id or result.modified_count:
-            # Clear sudo cache for this user
-            if target_user in SUDO_CACHE:
-                del SUDO_CACHE[target_user]
-            await update.message.reply_text(f"✅ Added user {target_user} to sudo list!")
-        else:
-            await update.message.reply_text("⚠️ Failed to add user to sudo list")
-    except Exception as e:
-        logger.error(f"Add sudo error: {e}")
-        await update.message.reply_text("⚠️ Database error during sudo add")
+        # Clear premium cache
+        if target_user_id in PREMIUM_CACHE:
+            del PREMIUM_CACHE[target_user_id]
+        
+        # Format dates for display
+        join_date = now.strftime("%Y-%m-%d")
+        join_time = now.strftime("%H:%M:%S")
+        expiry_date_str = expiry_date.strftime("%Y-%m-%d")
+        expiry_time = expiry_date.strftime("%H:%M:%S")
+        
+        # Send message to premium user
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"👋 ʜᴇʏ {target_fullname},\n"
+                    "ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴘᴜʀᴄʜᴀꜱɪɴɢ ᴘʀᴇᴍɪᴜᴍ.\n"
+                    "ᴇɴᴊᴏʏ !! ✨🎉\n\n"
+                    f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ : {duration_str}\n"
+                    f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {join_date}\n"
+                    f"⏱️ ᴊᴏɪɴɪɴɢ ᴛɪᴍᴇ : {join_time}\n\n"
+                    f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date_str}\n"
+                    f"⏱️ ᴇxᴘɪʀʏ ᴛɪᴍᴇ : {expiry_time}"
+                )
+            )
+        except Exception as e:
+            logger.error(f"Could not send premium message to user: {e}")
+        
+        # Send confirmation to admin
+        await update.message.reply_text(
+            "ᴘʀᴇᴍɪᴜᴍ ᴀᴅᴅᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ ✅\n\n"
+            f"👤 ᴜꜱᴇʀ : {target_fullname}\n"
+            f"⚡ ᴜꜱᴇʀ ɪᴅ : `{target_user_id}`\n"
+            f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ : {duration_str}\n\n"
+            f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ : {join_date}\n"
+            f"⏱️ ᴊᴏɪɴɪɴɢ ᴛɪᴍᴇ : {join_time}\n\n"
+            f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_date_str}\n"
+            f"⏱️ ᴇxᴘɪʀʏ ᴛɪᴍᴇ : {expiry_time}",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("⚠️ Database error. Premium not added.")
 
-async def rem_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def remove_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     
     # Verify owner
@@ -945,45 +773,99 @@ async def rem_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     # Get target user
-    target_user = None
-    if context.args:
-        try:
-            target_user = int(context.args[0])
-        except ValueError:
-            pass
-    elif update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user.id
+    target_user_id = None
     
-    if not target_user:
-        await update.message.reply_text(
-            "ℹ️ Usage:\n"
-            "Reply to user's message with /remsudo\n"
-            "Or use /remsudo <user_id>"
-        )
+    # Check if reply
+    if update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        target_user_id = target_user.id
+    elif context.args:
+        # Try to parse as user ID
+        try:
+            target_user_id = int(context.args[0])
+        except ValueError:
+            # Treat as username
+            username = context.args[0].lstrip('@')
+            if DB is not None:
+                user_data = await DB.users.find_one({"username": username})
+                if user_data:
+                    target_user_id = user_data["user_id"]
+    
+    if target_user_id is None:
+        await update.message.reply_text("❌ Please specify a user by replying or providing user ID/username")
         return
+    
+    # Remove from premium collection
+    if DB is not None:
+        result = await DB.premium_users.delete_one({"user_id": target_user_id})
         
-    # Remove from sudo list - check if DB is initialized (not None)
-    if DB is None:
-        await update.message.reply_text("⚠️ Database connection error")
-        return
-        
-    try:
-        result = await DB.sudo_users.delete_one({"user_id": target_user})
-        
-        if result.deleted_count:
-            # Clear sudo cache for this user
-            if target_user in SUDO_CACHE:
-                del SUDO_CACHE[target_user]
-            await update.message.reply_text(f"✅ Removed user {target_user} from sudo list!")
+        if result.deleted_count > 0:
+            # Clear premium cache
+            if target_user_id in PREMIUM_CACHE:
+                del PREMIUM_CACHE[target_user_id]
+            
+            await update.message.reply_text(
+                f"✅ Premium access removed for user ID: `{target_user_id}`",
+                parse_mode='Markdown'
+            )
         else:
-            await update.message.reply_text("⚠️ User not found in sudo list")
+            await update.message.reply_text("ℹ️ User not found in premium list")
+    else:
+        await update.message.reply_text("⚠️ Database error. Premium not removed.")
+
+async def list_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await record_user_interaction(update)
+    
+    # Verify owner
+    owner_id = os.getenv('OWNER_ID')
+    if not owner_id or str(update.effective_user.id) != owner_id:
+        await update.message.reply_text("🚫 This command is only available to the bot owner.")
+        return
+        
+    if DB is None:
+        await update.message.reply_text("⚠️ Database connection error.")
+        return
+    
+    try:
+        # Get all premium users
+        premium_users = []
+        async for user in DB.premium_users.find({}):
+            premium_users.append(user)
+        
+        if not premium_users:
+            await update.message.reply_text("ℹ️ No premium users found.")
+            return
+            
+        response = "🌟 *Premium Users List* 🌟\n\n"
+        
+        for user in premium_users:
+            user_id = user["user_id"]
+            full_name = user.get("full_name", "Unknown")
+            plan = user.get("plan", "Unknown")
+            start_date = user["start_date"].strftime("%Y-%m-%d %H:%M")
+            expiry_date = user["expiry_date"].strftime("%Y-%m-%d %H:%M")
+            
+            response += (
+                f"👤 *User*: {full_name}\n"
+                f"🆔 *ID*: `{user_id}`\n"
+                f"📦 *Plan*: {plan}\n"
+                f"⏱️ *Start*: {start_date}\n"
+                f"⏳ *Expiry*: {expiry_date}\n"
+                f"────────────────────\n"
+            )
+        
+        await update.message.reply_text(
+            response,
+            parse_mode='Markdown'
+        )
+        
     except Exception as e:
-        logger.error(f"Remove sudo error: {e}")
-        await update.message.reply_text("⚠️ Database error during sudo removal")
+        logger.error(f"Premium list error: {e}")
+        await update.message.reply_text("⚠️ Error retrieving premium users.")
 
 # Optimized token validation with caching
 async def has_valid_token(user_id):
-    if await is_sudo(user_id):
+    if await is_sudo(user_id) or await is_premium(user_id):
         return True
         
     # Check cache first
@@ -1007,6 +889,35 @@ async def has_valid_token(user_id):
     }
     return result
 
+# Premium check with caching
+async def is_premium(user_id):
+    # Check cache first
+    cached = PREMIUM_CACHE.get(user_id)
+    if cached and time.time() < cached['expiry']:
+        return cached['result']
+        
+    result = False
+    # Check if DB is initialized (not None)
+    if DB is not None:
+        try:
+            premium_data = await DB.premium_users.find_one({"user_id": user_id})
+            if premium_data:
+                # Check if premium has expired
+                if premium_data["expiry_date"] > datetime.utcnow():
+                    result = True
+                else:
+                    # Remove expired premium
+                    await DB.premium_users.delete_one({"_id": premium_data["_id"]})
+        except Exception as e:
+            logger.error(f"Premium check error: {e}")
+    
+    # Update cache
+    PREMIUM_CACHE[user_id] = {
+        'result': result,
+        'expiry': time.time() + CACHE_EXPIRY
+    }
+    return result
+
 async def main_async() -> None:
     """Async main function"""
     global DB, SESSION
@@ -1019,17 +930,8 @@ async def main_async() -> None:
         await asyncio.gather(
             create_ttl_index(),
             create_sudo_index(),
-            create_clone_index()
+            create_premium_index()
         )
-    
-    # Start any existing cloned bots if DB is available
-    if DB is not None:
-        cloned_bots = []
-        async for bot in DB.cloned_bots.find({}):
-            cloned_bots.append(bot['token'])
-        
-        for token in cloned_bots:
-            threading.Thread(target=run_cloned_bot, args=(token,), daemon=True).start()
     
     # Get token from environment
     TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -1049,12 +951,12 @@ async def main_async() -> None:
     application.add_handler(CommandHandler("confirm_broadcast", confirm_broadcast_wrapper))
     application.add_handler(CommandHandler("cancel", cancel_broadcast_wrapper))
     application.add_handler(CommandHandler("token", token_command))
-    application.add_handler(CommandHandler("clone", clone_command))
     application.add_handler(MessageHandler(filters.Document.TEXT, handle_document_wrapper))
     
-    # Add sudo management commands
-    application.add_handler(CommandHandler("addsudo", add_sudo))
-    application.add_handler(CommandHandler("remsudo", rem_sudo))
+    # Add premium management commands
+    application.add_handler(CommandHandler("add", add_premium))
+    application.add_handler(CommandHandler("rem", remove_premium))
+    application.add_handler(CommandHandler("premium", list_premium))
     
     # Start polling
     logger.info("Starting Telegram bot in polling mode...")
