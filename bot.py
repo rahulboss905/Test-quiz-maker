@@ -709,7 +709,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(
         "📢 <b>Broadcast Mode Activated</b>\n\n"
         "Please send the message you want to broadcast to all users.\n"
-        "You can send text, photos, videos, documents, or any other media.\n\n"
+        "You can send text, photos, videos, stickers, documents, or any other media.\n\n"
         "When ready, use /confirm_broadcast to send or /cancel_broadcast to abort.",
         parse_mode='HTML'
     )
@@ -779,6 +779,11 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         document=broadcast_data['content'],
                         caption=broadcast_data.get('caption', ''),
                         parse_mode=broadcast_data.get('parse_mode', None)
+                    )
+                elif broadcast_data['type'] == 'sticker':
+                    await context.bot.send_sticker(
+                        chat_id=user['user_id'],
+                        sticker=broadcast_data['content']
                     )
                 else:
                     # Fallback to text
@@ -867,6 +872,9 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         broadcast_data['content'] = update.message.document.file_id
         broadcast_data['caption'] = update.message.caption_html if update.message.caption_html else update.message.caption
         broadcast_data['parse_mode'] = 'HTML'
+    elif update.message.sticker:
+        broadcast_data['type'] = 'sticker'
+        broadcast_data['content'] = update.message.sticker.file_id
     else:
         await update.message.reply_text("⚠️ Unsupported message type for broadcast. Please send text or media.")
         return
@@ -885,6 +893,8 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     
     if broadcast_data['type'] == 'text':
         preview_text += broadcast_data['content']
+    elif broadcast_data['type'] == 'sticker':
+        preview_text += "🎴 <i>Sticker will be sent</i>"
     else:
         preview_text += f"<b>Type:</b> {broadcast_data['type'].capitalize()}\n"
         if broadcast_data.get('caption'):
