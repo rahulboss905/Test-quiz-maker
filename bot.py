@@ -428,31 +428,31 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # Create premium plans message
     plans_message = (
-        "💠 𝗨𝗣𝗚𝗥𝗔𝗗𝗘 𝗧𝗢 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 💠\n\n"
-        "🚀 𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:\n"
-        "🧠 𝗨𝗡𝗟𝗜𝗠𝗜𝗧𝗘𝗗 𝗤𝗨𝗜𝗭 𝗖𝗥𝗘𝗔𝗧𝗜𝗢𝗡\n\n"
+        "💠 UPGRADE TO PREMIUM 💠\n\n"
+        "🚀 Premium Features:\n"
+        "🧠 UNLIMITED QUIZ CREATION\n\n"
         
-        "🔓 �𝙍𝙀𝙀 𝙋𝙇𝘼𝙉 (𝘸𝘪𝘵𝘩 𝘳𝘦𝘴𝘵𝘳𝘪𝘤𝘵𝘪𝘰𝘯𝘴)\n"
-        "🕰️ 𝗘𝘅𝗽𝗶𝗿𝘆: Never\n"
-        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟬\n\n"
+        "🔓 FREE PLAN (with restrictions)\n"
+        "🕰️ Expiry: Never\n"
+        "💰 Price: ₹0\n\n"
         
-        "🕐 𝟭-𝗗𝗔𝗬 𝗣𝗟𝗔𝗡\n"
-        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟭𝟬 🇮🇳\n"
-        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 1 Day\n\n"
+        "🕐 1-DAY PLAN\n"
+        "💰 Price: ₹10 🇮🇳\n"
+        "📅 Duration: 1 Day\n\n"
         
-        "📆 𝟭-𝗪𝗘𝗘𝗞 𝗣𝗟𝗔𝗡\n"
-        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟮𝟱 🇮🇳\n"
-        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 10 Days\n\n"
+        "📆 1-WEEK PLAN\n"
+        "💰 Price: ₹25 🇮🇳\n"
+        "📅 Duration: 10 Days\n\n"
         
-        "🗓️ 𝗠𝗢𝗡𝗧𝗛𝗟𝗬 𝗣𝗟𝗔𝗡\n"
-        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟱𝟬 🇮🇳\n"
-        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 1 Month\n\n"
+        "🗓️ MONTHLY PLAN\n"
+        "💰 Price: ₹50 🇮🇳\n"
+        "📅 Duration: 1 Month\n\n"
         
-        "🪙 𝟮-𝗠𝗢𝗡𝗧𝗛𝗬 𝗣𝗟𝗔𝗡\n"
-        "💰 𝗣𝗿𝗶𝗰𝗲: ₹𝟭𝟬𝟬 🇮🇳\n"
-        "📅 𝗗𝘂𝗿𝗮𝘁𝗶𝗼𝗻: 2 Months\n\n"
+        "🪙 2-MONTH PLAN\n"
+        "💰 Price: ₹100 🇮🇳\n"
+        "📅 Duration: 2 Months\n\n"
         
-        f"📞 𝗖𝗼𝗻𝘁𝗮𝗰𝘁 𝗡𝗼𝘄 𝘁𝗼 𝗨𝗽𝗴𝗿𝗮𝗱𝗲\n👉 {PREMIUM_CONTACT}"
+        f"📞 Contact Now to Upgrade\n👉 {PREMIUM_CONTACT}"
     )
     
     keyboard = [
@@ -466,7 +466,7 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
-
+    
 async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
     await update.message.reply_text(
