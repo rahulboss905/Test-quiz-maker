@@ -48,6 +48,9 @@ YOUTUBE_TUTORIAL = "https://youtu.be/WeqpaV6VnO4?si=Y0pDondqe-nmIuht"
 GITHUB_REPO = "https://github.com/yourusername/your-repo"
 PREMIUM_CONTACT = "@Mr_rahul090"  # Premium contact
 
+# Quiz limit configuration
+DAILY_QUIZ_LIMIT = int(os.getenv('DAILY_QUIZ_LIMIT', 20))  # Default is 20 quizzes/day
+
 # Caches for performance
 SUDO_CACHE = {}
 TOKEN_CACHE = {}
@@ -74,7 +77,7 @@ def run_flask():
 def to_ist(utc_time):
     return utc_time + timedelta(hours=5, minutes=30)
 
-# Format time in IST
+# Format time in IST (24-hour format)
 def format_ist(utc_time):
     ist_time = to_ist(utc_time)
     return ist_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -527,10 +530,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Check if user is premium
     is_prem = await is_premium(user_id)
     
-    # For token users, check daily quiz limit (20 quizzes)
+    # For token users, check daily quiz limit
     if not is_prem:
         # Get today's date
         today = datetime.utcnow().date()
+        current_count = 0
         
         # Check if user has exceeded daily limit
         if DB is not None:
@@ -542,12 +546,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 # Reset count if it's a new day
                 if last_quiz_date != today:
                     quiz_count = 0
+                current_count = quiz_count
                 
                 # Check if user has exceeded limit
-                if quiz_count >= 20:
+                if current_count >= DAILY_QUIZ_LIMIT:
                     await update.message.reply_text(
-                        "⚠️ You've reached your daily quiz limit (20 quizzes).\n\n"
-                        "Token users are limited to 20 quizzes per day.\n"
+                        f"⚠️ You've reached your daily quiz limit ({DAILY_QUIZ_LIMIT} quizzes).\n\n"
+                        "Token users are limited to {DAILY_QUIZ_LIMIT} quizzes per day.\n"
                         "Upgrade to premium for unlimited access!",
                         parse_mode='Markdown'
                     )
@@ -565,6 +570,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         # Parse and validate
         valid_questions, errors = parse_quiz_file(content)
+        
+        # For non-premium users, enforce daily limit
+        if not is_prem and valid_questions:
+            remaining_quota = DAILY_QUIZ_LIMIT - current_count
+            if len(valid_questions) > remaining_quota:
+                valid_questions = valid_questions[:remaining_quota]
+                if not errors:
+                    errors = []
+                errors.append(f"⚠️ Only first {remaining_quota} questions sent due to daily limit")
         
         # Report errors
         if errors:
@@ -625,7 +639,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     {"user_id": user_id},
                     {
                         "$set": {"last_quiz_date": today},
-                        "$inc": {"quiz_count": 1}
+                        "$inc": {"quiz_count": sent_count}
                     },
                     upsert=True
                 )
@@ -682,7 +696,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"• Premium Users: `{premium_count}`\n"
             f"• Current Ping: `{ping_time:.2f} ms`\n"
             f"• Uptime: `{uptime}`\n"
-            f"• Version: `{BOT_VERSION}`\n\n"
+            f"• Version: `{BOT_VERSION}`\n"
+            f"• Quiz Limit: `{DAILY_QUIZ_LIMIT}`/day\n\n"
             f"_Updated at {format_ist(datetime.utcnow())} IST_"
         )
         
@@ -983,7 +998,7 @@ async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     now = datetime.utcnow()
     expiry_date = now + duration
     
-    # Format dates for IST display
+    # Format dates for IST display (24-hour format)
     join_date_ist = format_ist(now)
     expiry_date_ist = format_ist(expiry_date)
     
@@ -1160,7 +1175,7 @@ async def my_plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if DB is not None:
         premium_data = await DB.premium_users.find_one({"user_id": user_id})
         if premium_data:
-            # Format dates in IST
+            # Format dates in IST (24-hour format)
             start_date = format_ist(premium_data["start_date"])
             expiry_date = format_ist(premium_data["expiry_date"])
             time_left = format_time_left(premium_data["expiry_date"])
