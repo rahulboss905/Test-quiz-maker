@@ -467,11 +467,21 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
-        plans_message,
-        parse_mode='HTML',
-        reply_markup=reply_markup
-    )
+    # Check if we're in a callback context (button press)
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            text=plans_message,
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(
+            plans_message,
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
 
 async def create_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await record_user_interaction(update)
@@ -548,11 +558,35 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             # Check if user has exceeded daily limit
             if quiz_count >= DAILY_QUIZ_LIMIT:
-                await update.message.reply_text(
+                # Create message with button
+                message_text = (
                     f"⚠️ You've reached your daily quiz limit ({DAILY_QUIZ_LIMIT} quizzes).\n\n"
                     f"Token users are limited to {DAILY_QUIZ_LIMIT} quizzes per day.\n"
-                    "Upgrade to premium for unlimited access!",
-                    parse_mode='Markdown'
+                    "Upgrade to premium for unlimited access!\n\n"
+                    "Send /plan to know our premium plans"
+                )
+                
+                # Create inline buttons
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            "💎 Contact for Premium",
+                            url=f"https://t.me/{PREMIUM_CONTACT.lstrip('@')}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "📋 View Premium Plans",
+                            callback_data="premium_plans"
+                        )
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    message_text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
                 )
                 return
     
@@ -582,11 +616,35 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             remaining_quota = DAILY_QUIZ_LIMIT - quiz_count
             if remaining_quota <= 0:
-                await update.message.reply_text(
+                # Create message with button
+                message_text = (
                     f"⚠️ You've reached your daily quiz limit ({DAILY_QUIZ_LIMIT} quizzes).\n\n"
                     f"Token users are limited to {DAILY_QUIZ_LIMIT} quizzes per day.\n"
-                    "Upgrade to premium for unlimited access!",
-                    parse_mode='Markdown'
+                    "Upgrade to premium for unlimited access!\n\n"
+                    "Send /plan to know our premium plans"
+                )
+                
+                # Create inline buttons
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            "💎 Contact for Premium",
+                            url=f"https://t.me/{PREMIUM_CONTACT.lstrip('@')}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "📋 View Premium Plans",
+                            callback_data="premium_plans"
+                        )
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    message_text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
                 )
                 return
                 
