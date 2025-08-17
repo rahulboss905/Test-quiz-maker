@@ -532,31 +532,29 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     # For token users, check daily quiz limit
     if not is_prem:
-        # Get today's date
-        today = datetime.utcnow().date()
-        current_count = 0
+        # Get today's date in UTC
+        today_utc = datetime.utcnow().date()
         
-        # Check if user has exceeded daily limit
+        # Check daily quiz count
         if DB is not None:
             user_data = await DB.users.find_one({"user_id": user_id})
+            quiz_count = 0
+            
             if user_data:
+                # Check if last quiz date is today
                 last_quiz_date = user_data.get("last_quiz_date")
-                quiz_count = user_data.get("quiz_count", 0)
-                
-                # Reset count if it's a new day
-                if last_quiz_date != today:
-                    quiz_count = 0
-                current_count = quiz_count
-                
-                # Check if user has exceeded limit
-                if current_count >= DAILY_QUIZ_LIMIT:
-                    await update.message.reply_text(
-                        f"⚠️ You've reached your daily quiz limit ({DAILY_QUIZ_LIMIT} quizzes).\n\n"
-                        "Token users are limited to {DAILY_QUIZ_LIMIT} quizzes per day.\n"
-                        "Upgrade to premium for unlimited access!",
-                        parse_mode='Markdown'
-                    )
-                    return
+                if last_quiz_date and last_quiz_date.date() == today_utc:
+                    quiz_count = user_data.get("quiz_count", 0)
+            
+            # Check if user has exceeded daily limit
+            if quiz_count >= DAILY_QUIZ_LIMIT:
+                await update.message.reply_text(
+                    f"⚠️ You've reached your daily quiz limit ({DAILY_QUIZ_LIMIT} quizzes).\n\n"
+                    f"Token users are limited to {DAILY_QUIZ_LIMIT} quizzes per day.\n"
+                    "Upgrade to premium for unlimited access!",
+                    parse_mode='Markdown'
+                )
+                return
     
     if not update.message.document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Please send a .txt file")
@@ -573,7 +571,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         # For non-premium users, enforce daily limit
         if not is_prem and valid_questions:
-            remaining_quota = DAILY_QUIZ_LIMIT - current_count
+            # Get current count again to be safe
+            if DB is not None:
+                user_data = await DB.users.find_one({"user_id": user_id})
+                quiz_count = 0
+                if user_data:
+                    last_quiz_date = user_data.get("last_quiz_date")
+                    if last_quiz_date and last_quiz_date.date() == today_utc:
+                        quiz_count = user_data.get("quiz_count", 0)
+            
+            remaining_quota = DAILY_QUIZ_LIMIT - quiz_count
+            if remaining_quota <= 0:
+                await update.message.reply_text(
+                    f"⚠️ You've reached your daily quiz limit ({DAILY_QUIZ_LIMIT} quizzes).\n\n"
+                    f"Token users are limited to {DAILY_QUIZ_LIMIT} quizzes per day.\n"
+                    "Upgrade to premium for unlimited access!",
+                    parse_mode='Markdown'
+                )
+                return
+                
             if len(valid_questions) > remaining_quota:
                 valid_questions = valid_questions[:remaining_quota]
                 if not errors:
@@ -634,11 +650,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             # Update quiz count for token users
             if not is_prem and DB is not None:
-                today = datetime.utcnow().date()
+                today_utc = datetime.utcnow().date()
                 await DB.users.update_one(
                     {"user_id": user_id},
                     {
-                        "$set": {"last_quiz_date": today},
+                        "$set": {"last_quiz_date": datetime.utcnow()},
                         "$inc": {"quiz_count": sent_count}
                     },
                     upsert=True
